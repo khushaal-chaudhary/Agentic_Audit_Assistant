@@ -5,8 +5,12 @@
 1. The evidence ledger is authoritative for facts, calculations, and findings.
 2. Cognee is a semantic/graph projection, not the authority for arithmetic or citations.
 3. Deterministic rules evaluate amounts, dates, identities, and matches before model reasoning.
-4. Every monetary value is a `Decimal` derived from a source value or a disclosed calculation.
+4. Every monetary value is a Decimal with a term-level calculation trace that recomputes the
+   displayed total from exact source locators.
 5. Missing support is represented as `not_testable`; it is not evidence of fraud by itself.
+
+Reports using the earlier amount-without-terms schema fail closed and must be rerun with the current
+engine before their figures can be displayed or projected.
 
 ## Demo topology
 

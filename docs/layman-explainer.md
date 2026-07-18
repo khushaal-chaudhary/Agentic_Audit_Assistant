@@ -106,10 +106,11 @@ than a model-generated summary.
 
 ### What does “no number without a source” mean?
 
-All audit amounts use decimal arithmetic and are recomputed from cited source values.
+All audit amounts use decimal arithmetic and are recomputed from individually cited source values.
 
 The system never asks a language model to perform or invent financial arithmetic. If an amount is
-displayed, the finding contains the source rows used to calculate it.
+displayed, the finding contains every source row and Decimal term used to calculate it. Reports fail
+closed when the terms do not reproduce the displayed total.
 
 ### Why do we use a graph?
 

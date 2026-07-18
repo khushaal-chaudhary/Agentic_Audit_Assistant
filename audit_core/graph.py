@@ -68,6 +68,8 @@ class CalculationNode(BaseModel):
     value: str
     currency: str | None
     method: Literal["deterministic_rule_aggregation"] = "deterministic_rule_aggregation"
+    operation: Literal["sum"] = "sum"
+    term_count: int = Field(ge=1)
 
 
 GraphNode = Annotated[
@@ -97,7 +99,7 @@ class GraphEdge(BaseModel):
 
 
 class EvidenceGraph(BaseModel):
-    schema_version: Literal["1.0"] = "1.0"
+    schema_version: Literal["1.1"] = "1.1"
     nodes: list[GraphNode]
     edges: list[GraphEdge]
 
@@ -148,7 +150,6 @@ def build_evidence_graph(report: DossierReport) -> EvidenceGraph:
         if procedure_id in known_nodes:
             edges.append(GraphEdge(source=procedure_id, relation="PRODUCED", target=finding_id))
 
-        locator_ids: list[str] = []
         for reference in finding.evidence:
             document_id = _stable_id("document", f"{reference.document}|{reference.sha256}")
             if document_id not in known_nodes:
@@ -161,7 +162,6 @@ def build_evidence_graph(report: DossierReport) -> EvidenceGraph:
                 )
                 known_nodes.add(document_id)
             locator_id = _locator_id(reference)
-            locator_ids.append(locator_id)
             if locator_id not in known_nodes:
                 nodes.append(
                     LocatorNode(
@@ -194,12 +194,20 @@ def build_evidence_graph(report: DossierReport) -> EvidenceGraph:
             edges.append(GraphEdge(source=finding_id, relation="AFFECTS", target=entity_id))
 
         if finding.amount is not None:
+            if finding.calculation is None:
+                raise ValueError(f"Finding {finding.id} has no exact calculation trace")
             calculation_id = f"calculation:{finding.id}"
+            term_locator_ids = [
+                _locator_id(term.evidence)
+                for term in finding.calculation.terms
+            ]
             nodes.append(
                 CalculationNode(
                     id=calculation_id,
                     value=format(finding.amount, "f"),
                     currency=finding.currency,
+                    operation=finding.calculation.operation,
+                    term_count=len(term_locator_ids),
                 )
             )
             edges.append(
@@ -207,7 +215,7 @@ def build_evidence_graph(report: DossierReport) -> EvidenceGraph:
             )
             edges.extend(
                 GraphEdge(source=calculation_id, relation="DERIVED_FROM", target=locator_id)
-                for locator_id in locator_ids
+                for locator_id in term_locator_ids
             )
 
     graph = EvidenceGraph(nodes=nodes, edges=edges)
@@ -219,11 +227,22 @@ def validate_evidence_graph(graph: EvidenceGraph) -> None:
     supported = {edge.source for edge in graph.edges if edge.relation == "SUPPORTED_BY"}
     calculated = {edge.target for edge in graph.edges if edge.relation == "HAS_CALCULATION"}
     derived = {edge.source for edge in graph.edges if edge.relation == "DERIVED_FROM"}
+    derived_targets: dict[str, set[str]] = {}
+    for edge in graph.edges:
+        if edge.relation == "DERIVED_FROM":
+            derived_targets.setdefault(edge.source, set()).add(edge.target)
     for node in graph.nodes:
         if node.type == "finding" and node.id not in supported:
             raise ValueError(f"Finding graph node has no source locator: {node.id}")
         if node.type == "calculation" and node.id not in derived:
             raise ValueError(f"Calculation graph node has no source locator: {node.id}")
+        if (
+            node.type == "calculation"
+            and len(derived_targets.get(node.id, set())) != node.term_count
+        ):
+            raise ValueError(
+                f"Calculation graph node has incomplete term lineage: {node.id}"
+            )
     orphaned_calculations = {
         node.id for node in graph.nodes if node.type == "calculation"
     } - calculated

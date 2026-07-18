@@ -15,6 +15,9 @@ from audit_core.models import DossierReport
 from audit_core.parsers import decode_text
 
 
+PROJECTION_VERSION = "projection-v4"
+
+
 class CogneeClient:
     """Small Cognee Cloud REST adapter; credentials stay in local environment variables."""
 
@@ -50,7 +53,7 @@ class CogneeClient:
             {reference.sha256 for finding in report.findings for reference in finding.evidence}
         )
         fingerprint = hashlib.sha256(
-            ("projection-v3|" + "|".join(hashes)).encode()
+            (PROJECTION_VERSION + "|" + "|".join(hashes)).encode()
         ).hexdigest()[:10]
         dataset = self.dataset_name(report.dossier_name, fingerprint)
         content = json.dumps(report.model_dump(mode="json"), ensure_ascii=False, indent=2).encode()

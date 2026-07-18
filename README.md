@@ -8,11 +8,14 @@ source locators.
 
 - GDPdU `index.xml`-driven parsing for headerless ledger exports.
 - Locale-safe `Decimal` handling for German monetary values.
-- CSV/TXT, XLSX, DOCX, and PDF source adapters.
+- CSV/TXT, XLSX, and DOCX fact adapters; PDFs are retained and source-served pending general
+  extraction/OCR support.
 - Generic detectors for vendor-control conflicts, capitalised repairs, cut-off failures, and split payments.
 - Persisted ZIP ingestion jobs with progress, secure source-document links, and restart-safe reports.
 - Persisted auditor dispositions with rationale-gated dismissal and direct finding navigation.
-- A typed evidence graph in which findings and decimal calculations must resolve to source locators.
+- Exact Decimal calculation traces in which every term resolves to its source locator and recomputes
+  the displayed total.
+- A typed evidence graph whose calculation edges point only to exact contributing terms.
 - Grounded OpenAI Q&A with deterministic fallback and server-side citation/number validation.
 - Cost-controlled Cognee graph projection; deterministic analysis works without cloud services.
 

@@ -7,7 +7,15 @@ from decimal import Decimal
 from pathlib import Path
 from uuid import NAMESPACE_URL, uuid5
 
-from .models import DossierReport, EvidenceRef, Finding, ProcedureResult, ensure_grounded
+from .models import (
+    CalculationTerm,
+    CalculationTrace,
+    DossierReport,
+    EvidenceRef,
+    Finding,
+    ProcedureResult,
+    ensure_grounded,
+)
 from .parsers import (
     SourceRow,
     extract_payment_threshold,
@@ -322,6 +330,17 @@ class AuditEngine:
                 (parse_decimal(row.data.get("BUCHUNGSBETRAG")) for row in expense_lines),
                 Decimal("0"),
             )
+            expense_evidence = [
+                row.evidence(
+                    "SACHKONTONUMMER",
+                    "BUCHUNGSNUMMER",
+                    "BUCHUNGSDATUM",
+                    "BUCHUNGSBETRAG",
+                    "BUCHUNGSTEXT",
+                    "BENUTZERKENNUNG",
+                )
+                for row in expense_lines
+            ]
             name = change.data.get("NAME") or vendor_id
             evidence = [
                 change.evidence(
@@ -341,15 +360,7 @@ class AuditEngine:
                 )
                 for row in invoices[:2] + payments[:2]
             )
-            evidence.extend(
-                row.evidence(
-                    "SACHKONTONUMMER",
-                    "BUCHUNGSNUMMER",
-                    "BUCHUNGSBETRAG",
-                    "BENUTZERKENNUNG",
-                )
-                for row in expense_lines[:2]
-            )
+            evidence.extend(expense_evidence)
             evidence.append(
                 _query_evidence(
                     self.receipt_path,
@@ -373,6 +384,20 @@ class AuditEngine:
                     ),
                     amount=net_total,
                     currency="EUR",
+                    calculation=CalculationTrace(
+                        currency="EUR",
+                        terms=[
+                            CalculationTerm(
+                                label=row.data.get("BUCHUNGSNUMMER")
+                                or f"ledger row {row.row_number}",
+                                value=parse_decimal(row.data.get("BUCHUNGSBETRAG")),
+                                evidence=reference,
+                            )
+                            for row, reference in zip(
+                                expense_lines, expense_evidence, strict=True
+                            )
+                        ],
+                    ),
                     affected_entities=[vendor_id, name, user],
                     evidence=evidence,
                     counterevidence_considered=[
@@ -415,17 +440,25 @@ class AuditEngine:
             Decimal("0"),
         )
         evidence: list[EvidenceRef] = []
+        calculation_terms: list[CalculationTerm] = []
         for asset, posting in matches:
             evidence.append(
                 asset.evidence("ANLAGENNUMMER", "ANLAGENBEZEICHNUNG", "ANLAGENGRUPPE")
             )
-            evidence.append(
-                posting.evidence(
-                    "ANLAGENNUMMER",
-                    "WERTSTELLUNG",
-                    "BELEGNUMMER",
-                    "BUCHUNGSBETRAG",
-                    "BUCHUNGSART",
+            posting_reference = posting.evidence(
+                "ANLAGENNUMMER",
+                "WERTSTELLUNG",
+                "BELEGNUMMER",
+                "BUCHUNGSBETRAG",
+                "BUCHUNGSART",
+            )
+            evidence.append(posting_reference)
+            calculation_terms.append(
+                CalculationTerm(
+                    label=posting.data.get("BELEGNUMMER")
+                    or f"asset posting row {posting.row_number}",
+                    value=parse_decimal(posting.data.get("BUCHUNGSBETRAG")),
+                    evidence=posting_reference,
                 )
             )
         return [
@@ -445,6 +478,10 @@ class AuditEngine:
                 ),
                 amount=total,
                 currency="EUR",
+                calculation=CalculationTrace(
+                    currency="EUR",
+                    terms=calculation_terms,
+                ),
                 affected_entities=[asset.data["ANLAGENNUMMER"] for asset, _ in matches],
                 evidence=evidence,
                 counterevidence_considered=[
@@ -486,26 +523,36 @@ class AuditEngine:
             (parse_decimal(invoice.data.get("BETRAG_EUR")) for invoice, _ in matches),
             Decimal("0"),
         )
-        evidence = [
-            ref
-            for invoice, receipt in matches
-            for ref in (
-                invoice.evidence(
-                    "RECHNUNGSNUMMER",
-                    "KREDITOR",
-                    "FAKTURADATUM",
-                    "LEISTUNGSDATUM",
-                    "BETRAG_EUR",
-                ),
-                receipt.evidence(
-                    "WARENEINGANG_NR",
-                    "WARENEINGANG_DATUM",
-                    "KREDITOR",
-                    "BETRAG_EUR",
-                    "BEMERKUNG",
-                ),
+        evidence: list[EvidenceRef] = []
+        calculation_terms = []
+        for invoice, receipt in matches:
+            invoice_reference = invoice.evidence(
+                "RECHNUNGSNUMMER",
+                "KREDITOR",
+                "FAKTURADATUM",
+                "LEISTUNGSDATUM",
+                "BETRAG_EUR",
             )
-        ]
+            evidence.extend(
+                (
+                    invoice_reference,
+                    receipt.evidence(
+                        "WARENEINGANG_NR",
+                        "WARENEINGANG_DATUM",
+                        "KREDITOR",
+                        "BETRAG_EUR",
+                        "BEMERKUNG",
+                    ),
+                )
+            )
+            calculation_terms.append(
+                CalculationTerm(
+                    label=invoice.data.get("RECHNUNGSNUMMER")
+                    or f"invoice row {invoice.row_number}",
+                    value=parse_decimal(invoice.data.get("BETRAG_EUR")),
+                    evidence=invoice_reference,
+                )
+            )
         evidence.extend(
             row.evidence(
                 "SACHKONTONUMMER", "BUCHUNGSDATUM", "BUCHUNGSBETRAG", "BUCHUNGSTEXT"
@@ -543,6 +590,10 @@ class AuditEngine:
                 ),
                 amount=total,
                 currency="EUR",
+                calculation=CalculationTrace(
+                    currency="EUR",
+                    terms=calculation_terms,
+                ),
                 affected_entities=sorted(
                     {invoice.data["KREDITOR"] for invoice, _ in matches}
                 ),
@@ -592,7 +643,7 @@ class AuditEngine:
                 suppressed += 1
                 continue
             evidence = [threshold_evidence]
-            evidence.extend(
+            payment_evidence = [
                 row.evidence(
                     "LIEFERANTENKONTONUMMER",
                     "BUCHUNGSNUMMER",
@@ -601,7 +652,8 @@ class AuditEngine:
                     "BUCHUNGSBETRAG",
                 )
                 for row in near
-            )
+            ]
+            evidence.extend(payment_evidence)
             findings.append(
                 Finding(
                     id=_finding_id(
@@ -621,6 +673,20 @@ class AuditEngine:
                     ),
                     amount=total,
                     currency="EUR",
+                    calculation=CalculationTrace(
+                        currency="EUR",
+                        terms=[
+                            CalculationTerm(
+                                label=row.data.get("BUCHUNGSNUMMER")
+                                or f"payment row {row.row_number}",
+                                value=parse_decimal(row.data.get("BUCHUNGSBETRAG")),
+                                evidence=reference,
+                            )
+                            for row, reference in zip(
+                                near, payment_evidence, strict=True
+                            )
+                        ],
+                    ),
                     affected_entities=[vendor, booking_date],
                     evidence=evidence,
                     counterevidence_considered=[

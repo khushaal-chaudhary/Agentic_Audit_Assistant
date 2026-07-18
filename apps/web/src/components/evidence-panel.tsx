@@ -45,6 +45,70 @@ export function EvidencePanel({ finding, apiUrl, jobId }: Props) {
           </div>
           <p className="mt-4 text-sm leading-6 text-[var(--muted)]">{finding.summary}</p>
 
+          {finding.amount && finding.calculation && (
+            <section
+              aria-label="Exact calculation trace"
+              className="mt-6 overflow-hidden rounded-xl border border-[var(--line)]"
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2 bg-[var(--mint)] px-4 py-3">
+                <div>
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.13em] text-[var(--green)]">
+                    Exact calculation trace
+                  </p>
+                  <p className="mt-1 text-xs text-[var(--green)]">
+                    {finding.calculation.operation.toUpperCase()} · {finding.calculation.terms.length} source value(s)
+                  </p>
+                </div>
+                <span className="result-chip passed">Recomputed</span>
+              </div>
+              <div className="divide-y divide-[var(--line)] bg-white">
+                {finding.calculation.terms.map((term, index) => {
+                  const content = (
+                    <>
+                      <span className="min-w-0">
+                        <span className="block truncate text-xs font-semibold">{term.label}</span>
+                        <span className="mt-1 block truncate text-[10px] text-[var(--muted)]">
+                          {term.evidence.document} · {evidenceLocator(term.evidence)}
+                        </span>
+                      </span>
+                      <span className="shrink-0 font-mono text-xs font-semibold">
+                        {money(term.value, finding.calculation?.currency)}
+                      </span>
+                    </>
+                  );
+                  const className =
+                    "flex items-center justify-between gap-4 px-4 py-3 hover:bg-[var(--soft)]";
+                  const key = [
+                    term.evidence.document,
+                    term.evidence.row ?? index,
+                    term.label,
+                  ].join("-");
+                  return jobId ? (
+                    <a
+                      className={className}
+                      href={evidenceUrl(apiUrl, jobId, term.evidence)}
+                      key={key}
+                      rel="noreferrer"
+                      target="_blank"
+                    >
+                      {content}
+                    </a>
+                  ) : (
+                    <div className={className} key={key}>
+                      {content}
+                    </div>
+                  );
+                })}
+              </div>
+              <div className="flex items-center justify-between border-t border-[var(--line)] bg-[#fbfbf9] px-4 py-3">
+                <span className="text-xs font-semibold">Recomputed total</span>
+                <span className="font-mono text-sm font-semibold">
+                  {money(finding.amount, finding.calculation.currency)}
+                </span>
+              </div>
+            </section>
+          )}
+
           <div className="my-6 h-px bg-[var(--line)]" />
           <p className="text-[10px] font-semibold uppercase tracking-[0.13em] text-[var(--muted)]">Source evidence</p>
           <div className="mt-3 space-y-3">

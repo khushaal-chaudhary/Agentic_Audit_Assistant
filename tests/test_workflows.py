@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shutil
 import zipfile
 from decimal import Decimal
@@ -7,10 +8,18 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from audit_core import analyze_dossier
-from audit_core.graph import build_evidence_graph
-from audit_core.models import DossierReport, EvidenceRef, Finding, ProcedureResult
+from audit_core.graph import _locator_id, build_evidence_graph
+from audit_core.models import (
+    CalculationTerm,
+    CalculationTrace,
+    DossierReport,
+    EvidenceRef,
+    Finding,
+    ProcedureResult,
+)
 from audit_core.qa import _ModelClaim, _resolve_claims, answer_question
 from services.api import main as api_main
 from services.api.jobs import JobStore
@@ -21,6 +30,13 @@ SAMPLE = ROOT / "Uebungsdaten_Muster_Verpackungen" / "Uebungsdaten Muster Verpac
 
 
 def minimal_report() -> DossierReport:
+    amount_evidence = EvidenceRef(
+        document="evidence.csv",
+        locator_type="row",
+        row=1,
+        excerpt="amount=100",
+        sha256="a" * 64,
+    )
     return DossierReport(
         dossier_name="Synthetic review dossier",
         files_scanned=1,
@@ -37,15 +53,17 @@ def minimal_report() -> DossierReport:
                 amount=Decimal("100"),
                 currency="EUR",
                 affected_entities=["ENTITY-1"],
-                evidence=[
-                    EvidenceRef(
-                        document="evidence.csv",
-                        locator_type="row",
-                        row=1,
-                        excerpt="amount=100",
-                        sha256="a" * 64,
-                    )
-                ],
+                evidence=[amount_evidence],
+                calculation=CalculationTrace(
+                    currency="EUR",
+                    terms=[
+                        CalculationTerm(
+                            label="synthetic row 1",
+                            value=Decimal("100"),
+                            evidence=amount_evidence,
+                        )
+                    ],
+                ),
                 next_step="Inspect the source row.",
             )
         ],
@@ -141,6 +159,27 @@ def test_review_dispositions_validate_and_survive_store_reload(
     assert reloaded[0].note == "Explained clean item after source inspection."
 
 
+def test_legacy_amount_report_requires_rerun(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = JobStore(tmp_path / "jobs")
+    job = store.create("legacy")
+    payload = minimal_report().model_dump(mode="json")
+    del payload["findings"][0]["calculation"]
+    (store.job_dir(job.id) / "report.json").write_text(
+        json.dumps(payload),
+        encoding="utf-8",
+    )
+    store.update(job.id, report_ready=True)
+    monkeypatch.setattr(api_main, "JOBS", store)
+
+    response = TestClient(api_main.app).get(f"/api/dossiers/{job.id}/report")
+
+    assert response.status_code == 409
+    assert "rerun" in response.json()["detail"].casefold()
+
+
 def test_deterministic_question_answer_keeps_source_evidence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -161,8 +200,82 @@ def test_graph_projection_links_findings_and_calculations_to_locators() -> None:
     supported = {edge.source for edge in graph.edges if edge.relation == "SUPPORTED_BY"}
     derived = {edge.source for edge in graph.edges if edge.relation == "DERIVED_FROM"}
 
+    assert graph.schema_version == "1.1"
     assert all(node.id in supported for node in graph.nodes if node.type == "finding")
     assert all(node.id in derived for node in graph.nodes if node.type == "calculation")
+
+
+def test_graph_calculations_derive_only_from_exact_terms() -> None:
+    report = analyze_dossier(SAMPLE)
+    graph = build_evidence_graph(report)
+    derived_by_calculation = {
+        f"calculation:{finding.id}": {
+            edge.target
+            for edge in graph.edges
+            if edge.source == f"calculation:{finding.id}"
+            and edge.relation == "DERIVED_FROM"
+        }
+        for finding in report.findings
+    }
+
+    for finding in report.findings:
+        assert finding.calculation is not None
+        assert derived_by_calculation[f"calculation:{finding.id}"] == {
+            _locator_id(term.evidence) for term in finding.calculation.terms
+        }
+    assert any(
+        len(derived_by_calculation[f"calculation:{finding.id}"])
+        < len(finding.evidence)
+        for finding in report.findings
+    )
+
+
+def test_amount_findings_fail_closed_without_complete_lineage() -> None:
+    report = minimal_report()
+    valid = report.findings[0]
+    other_evidence = valid.evidence[0].model_copy(update={"row": 2})
+
+    with pytest.raises(ValidationError, match="exact calculation trace"):
+        Finding(**valid.model_dump(exclude={"calculation"}))
+    with pytest.raises(ValidationError, match="terms total"):
+        Finding(
+            **valid.model_dump(exclude={"calculation"}),
+            calculation=valid.calculation.model_copy(
+                update={
+                    "terms": [
+                        valid.calculation.terms[0].model_copy(
+                            update={"value": Decimal("99")}
+                        )
+                    ]
+                }
+            ),
+        )
+    with pytest.raises(ValidationError, match="absent from finding evidence"):
+        Finding(
+            **valid.model_dump(exclude={"calculation"}),
+            calculation=valid.calculation.model_copy(
+                update={
+                    "terms": [
+                        valid.calculation.terms[0].model_copy(
+                            update={"evidence": other_evidence}
+                        )
+                    ]
+                }
+            ),
+        )
+    with pytest.raises(ValidationError, match="currencies must match"):
+        Finding(
+            **valid.model_dump(exclude={"calculation"}),
+            calculation=valid.calculation.model_copy(update={"currency": "USD"}),
+        )
+    with pytest.raises(ValidationError, match="cannot repeat"):
+        Finding(
+            **valid.model_dump(exclude={"amount", "calculation"}),
+            amount=Decimal("200"),
+            calculation=valid.calculation.model_copy(
+                update={"terms": [valid.calculation.terms[0]] * 2}
+            ),
+        )
 
 
 def test_model_claims_hide_raw_ids_and_reject_unsupported_numbers() -> None:

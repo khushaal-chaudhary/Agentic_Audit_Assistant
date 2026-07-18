@@ -24,6 +24,20 @@ def test_sample_detects_expected_rule_families_with_grounded_amounts() -> None:
     assert by_rule["SPLIT_PAYMENTS_BELOW_THRESHOLD"].amount == Decimal("39040")
     assert all(finding.evidence for finding in report.findings)
     assert all(ref.sha256 for finding in report.findings for ref in finding.evidence)
+    for finding in report.findings:
+        assert finding.calculation is not None
+        assert sum(
+            (term.value for term in finding.calculation.terms),
+            Decimal("0"),
+        ) == finding.amount
+        evidence = {
+            reference.model_dump_json(exclude_none=True)
+            for reference in finding.evidence
+        }
+        assert all(
+            term.evidence.model_dump_json(exclude_none=True) in evidence
+            for term in finding.calculation.terms
+        )
 
 
 def test_known_decoy_entities_are_not_published_as_findings() -> None:
@@ -45,4 +59,3 @@ def test_known_decoy_entities_are_not_published_as_findings() -> None:
         "040000-000197",
     ):
         assert clean_entity not in published
-

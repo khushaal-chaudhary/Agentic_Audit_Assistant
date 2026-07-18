@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_serializer
+from pydantic import BaseModel, Field, field_serializer, model_validator
 
 
 class EvidenceRef(BaseModel):
@@ -21,6 +21,22 @@ class EvidenceRef(BaseModel):
     sha256: str
 
 
+class CalculationTerm(BaseModel):
+    label: str = Field(min_length=1)
+    value: Decimal
+    evidence: EvidenceRef
+
+    @field_serializer("value")
+    def serialize_value(self, value: Decimal) -> str:
+        return format(value, "f")
+
+
+class CalculationTrace(BaseModel):
+    operation: Literal["sum"] = "sum"
+    currency: str
+    terms: list[CalculationTerm] = Field(min_length=1)
+
+
 class Finding(BaseModel):
     id: str
     rule_id: str
@@ -31,6 +47,7 @@ class Finding(BaseModel):
     summary: str
     amount: Decimal | None = None
     currency: str | None = None
+    calculation: CalculationTrace | None = None
     affected_entities: list[str] = Field(default_factory=list)
     evidence: list[EvidenceRef]
     counterevidence_considered: list[str] = Field(default_factory=list)
@@ -39,6 +56,37 @@ class Finding(BaseModel):
     @field_serializer("confidence", "amount")
     def serialize_decimal(self, value: Decimal | None) -> str | None:
         return None if value is None else format(value, "f")
+
+    @model_validator(mode="after")
+    def validate_calculation_lineage(self) -> "Finding":
+        if self.amount is None:
+            if self.calculation is not None:
+                raise ValueError("A calculation trace requires a displayed amount")
+            return self
+        if self.calculation is None:
+            raise ValueError("Displayed amounts require an exact calculation trace")
+        if self.currency != self.calculation.currency:
+            raise ValueError("Finding and calculation currencies must match")
+        total = sum((term.value for term in self.calculation.terms), Decimal("0"))
+        if total != self.amount:
+            raise ValueError(
+                f"Calculation terms total {total} but finding amount is {self.amount}"
+            )
+        term_keys = [
+            term.evidence.model_dump_json(exclude_none=True)
+            for term in self.calculation.terms
+        ]
+        if len(term_keys) != len(set(term_keys)):
+            raise ValueError("Calculation terms cannot repeat the same evidence locator")
+        evidence_keys = {
+            reference.model_dump_json(exclude_none=True)
+            for reference in self.evidence
+        }
+        if missing := set(term_keys) - evidence_keys:
+            raise ValueError(
+                f"Calculation terms contain {len(missing)} locator(s) absent from finding evidence"
+            )
+        return self
 
 
 class ProcedureResult(BaseModel):
@@ -55,13 +103,18 @@ class DossierReport(BaseModel):
     findings: list[Finding]
     procedures: list[ProcedureResult] = Field(default_factory=list)
     suppressed_leads: int = 0
-    engine_version: str = "0.2.0"
+    engine_version: str = "0.3.0"
 
 
 def ensure_grounded(report: DossierReport) -> None:
-    """Fail closed when a finding or numeric result lacks source evidence."""
+    """Fail closed when a finding or numeric result lacks exact source evidence."""
     for finding in report.findings:
         if not finding.evidence:
             raise ValueError(f"Finding {finding.id} has no evidence")
-        if finding.amount is not None and not any(ref.excerpt for ref in finding.evidence):
-            raise ValueError(f"Numeric finding {finding.id} has no source excerpt")
+        if finding.amount is not None:
+            if finding.calculation is None:
+                raise ValueError(f"Numeric finding {finding.id} has no calculation trace")
+            if not all(term.evidence.excerpt for term in finding.calculation.terms):
+                raise ValueError(
+                    f"Numeric finding {finding.id} has an empty calculation source excerpt"
+                )

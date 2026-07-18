@@ -9,7 +9,7 @@ import httpx
 from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, ValidationError, model_validator
 from fastapi.responses import FileResponse
 
 from audit_core import DossierReport, analyze_dossier
@@ -69,7 +69,7 @@ class ReviewRequest(BaseModel):
 
 app = FastAPI(
     title="Agentic Audit Assistant API",
-    version="0.2.0",
+    version="0.3.0",
     description="Deterministic, provenance-aware audit analysis.",
 )
 app.add_middleware(
@@ -94,6 +94,11 @@ def _report(job_id: str) -> DossierReport:
         return JOBS.report(job_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=409, detail="Dossier report is not ready") from exc
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="Dossier report uses an older schema; rerun the analysis",
+        ) from exc
 
 
 def _process_job(job_id: str, source: Path | None = None) -> None:
@@ -133,7 +138,7 @@ def _process_job(job_id: str, source: Path | None = None) -> None:
 
 @app.get("/health")
 def health() -> dict[str, str]:
-    return {"status": "ok", "engine": "0.2.0", "mode": "local-first"}
+    return {"status": "ok", "engine": "0.3.0", "mode": "local-first"}
 
 
 @app.post(

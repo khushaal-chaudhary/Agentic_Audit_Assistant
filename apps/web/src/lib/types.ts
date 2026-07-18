@@ -12,6 +12,18 @@ export type Evidence = {
   sha256: string;
 };
 
+export type CalculationTerm = {
+  label: string;
+  value: string;
+  evidence: Evidence;
+};
+
+export type CalculationTrace = {
+  operation: "sum";
+  currency: string;
+  terms: CalculationTerm[];
+};
+
 export type Finding = {
   id: string;
   rule_id: string;
@@ -22,6 +34,7 @@ export type Finding = {
   summary: string;
   amount?: string;
   currency?: string;
+  calculation?: CalculationTrace;
   affected_entities: string[];
   evidence: Evidence[];
   counterevidence_considered: string[];

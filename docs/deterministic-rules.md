@@ -14,7 +14,7 @@ Every rule must:
    fiscal years, or expected fraud totals.
 2. Use Decimal for monetary parsing, comparison, aggregation, and serialization.
 3. Publish no finding without exact evidence locators and source SHA-256 values.
-4. Trace every amount to the source locators used in its calculation.
+4. Trace every amount to every source locator and Decimal term used in its calculation.
 5. Represent missing required inputs as not_testable.
 6. Consider counterevidence before publication.
 7. Add a clean or near-miss regression whenever a detector is introduced or broadened.
@@ -48,6 +48,19 @@ The same physical source row, identified by resolved source path and row number,
 once. This prevents an ingestion-list duplicate from manufacturing count thresholds or inflating
 amounts. Separate source rows with similar business values remain distinct because they may
 represent genuine duplicate transactions requiring a dedicated detector.
+
+## Exact calculation lineage
+
+Every amount-bearing finding contains a sum trace with:
+
+- one Decimal term for every contributing source value;
+- a label and exact evidence locator for each term;
+- a currency matching the displayed finding amount.
+
+Finding validation fails closed when a trace is absent, a term locator is missing from the finding
+evidence, a locator is repeated, or the Decimal terms do not recompute the displayed total.
+Calculation graph edges derive only from these exact term locators, not from unrelated corroborating
+evidence such as permissions, policies, or absence queries.
 
 ## Implemented rule summary
 
