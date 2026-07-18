@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
-from datetime import timedelta
+from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
 from uuid import NAMESPACE_URL, uuid5
@@ -36,6 +36,18 @@ def _query_evidence(path: Path, root: Path, query: str, excerpt: str) -> Evidenc
         excerpt=excerpt,
         sha256=file_sha256(str(path)),
     )
+
+
+def _unique_rows(rows: list[SourceRow]) -> list[SourceRow]:
+    seen: set[tuple[str, int]] = set()
+    unique: list[SourceRow] = []
+    for row in rows:
+        key = (str(row.source.resolve()), row.row_number)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(row)
+    return unique
 
 
 def _find_companion(folder: Path, *name_fragments: str, suffix: str) -> Path:
@@ -88,6 +100,54 @@ class AuditEngine:
             if self.planning_path.exists()
             else []
         )
+        self._build_indexes()
+
+    def _build_indexes(self) -> None:
+        gl_by_document: dict[str, list[SourceRow]] = defaultdict(list)
+        postings_by_vendor: dict[str, list[SourceRow]] = defaultdict(list)
+        receipts_by_vendor: dict[str, list[SourceRow]] = defaultdict(list)
+        open_receipts_by_key: dict[
+            tuple[str, Decimal, date | None], list[SourceRow]
+        ] = defaultdict(list)
+        payment_groups: dict[tuple[str, str], list[SourceRow]] = defaultdict(list)
+
+        for row in _unique_rows(self.gl):
+            gl_by_document[row.data.get("BUCHUNGSNUMMER", "")].append(row)
+        for row in _unique_rows(self.vendor_postings):
+            vendor = row.data.get("LIEFERANTENKONTONUMMER", "")
+            postings_by_vendor[vendor].append(row)
+            amount = parse_decimal(row.data.get("BUCHUNGSBETRAG"))
+            if amount > 0 and "zahlung" in normalize_text(row.data.get("BUCHUNGSTEXT")):
+                payment_groups[(vendor, row.data.get("BUCHUNGSDATUM", ""))].append(row)
+        for row in _unique_rows(self.receipts):
+            vendor = row.data.get("KREDITOR", "")
+            receipts_by_vendor[vendor].append(row)
+            if "rechnung offen" in normalize_text(row.data.get("BEMERKUNG")):
+                key = (
+                    vendor,
+                    parse_decimal(row.data.get("BETRAG_EUR")),
+                    parse_date(row.data.get("WARENEINGANG_DATUM")),
+                )
+                open_receipts_by_key[key].append(row)
+
+        self.gl_by_document = dict(gl_by_document)
+        self.gl_document_numbers = set(gl_by_document)
+        self.postings_by_vendor = dict(postings_by_vendor)
+        self.receipts_by_vendor = dict(receipts_by_vendor)
+        self.open_receipts_by_key = dict(open_receipts_by_key)
+        self.payment_groups = dict(payment_groups)
+        self.permission_by_user = {
+            row.data.get("Benutzer", ""): row for row in self.permissions
+        }
+        self.assets_by_id = {
+            row.data.get("ANLAGENNUMMER", ""): row for row in self.assets
+        }
+        self.accrual_rows = [
+            row
+            for row in _unique_rows(self.gl)
+            if "ruckstellung" in normalize_text(row.data.get("BUCHUNGSTEXT"))
+            or "unfaktur" in normalize_text(row.data.get("BUCHUNGSTEXT"))
+        ]
 
     def _read_gdpdu(self, path: Path) -> list[SourceRow]:
         if not path.exists() or not (path.parent / "index.xml").exists():
@@ -133,6 +193,15 @@ class AuditEngine:
                 "SPLIT_PAYMENTS_BELOW_THRESHOLD", [self.vendor_path, self.planning_path]
             ),
         ]
+        if (
+            procedures[3].status == "completed"
+            and extract_payment_threshold(self.planning) is None
+        ):
+            procedures[3] = ProcedureResult(
+                rule_id="SPLIT_PAYMENTS_BELOW_THRESHOLD",
+                status="not_testable",
+                reason="No payment approval threshold could be extracted from the control document",
+            )
 
         if procedures[0].status == "completed":
             detected, detector_suppressed = self.detect_vendor_control_failures()
@@ -147,6 +216,7 @@ class AuditEngine:
             findings.extend(detected)
             suppressed += detector_suppressed
 
+        findings = list({finding.id: finding for finding in findings}.values())
         report = DossierReport(
             dossier_name=self.root.name,
             files_scanned=sum(1 for path in self.root.rglob("*") if path.is_file()),
@@ -161,25 +231,25 @@ class AuditEngine:
         return report
 
     def detect_vendor_control_failures(self) -> tuple[list[Finding], int]:
-        permission_by_user = {row.data.get("Benutzer", ""): row for row in self.permissions}
-        receipts_by_vendor: dict[str, list[SourceRow]] = defaultdict(list)
-        postings_by_vendor: dict[str, list[SourceRow]] = defaultdict(list)
-        for row in self.receipts:
-            receipts_by_vendor[row.data.get("KREDITOR", "")].append(row)
-        for row in self.vendor_postings:
-            postings_by_vendor[row.data.get("LIEFERANTENKONTONUMMER", "")].append(row)
-
         findings: list[Finding] = []
         suppressed = 0
-        for change in self.changes:
+        for change in sorted(
+            _unique_rows(self.changes),
+            key=lambda row: (
+                row.data.get("KONTO", ""),
+                row.data.get("DATUM", ""),
+                str(row.source),
+                row.row_number,
+            ),
+        ):
             field = normalize_text(change.data.get("FELD"))
             if "neuanlage" not in field or "kreditor" not in normalize_text(change.data.get("ART")):
                 continue
             vendor_id = change.data.get("KONTO", "")
             user = change.data.get("GEAENDERT_VON", "")
             approver = change.data.get("GENEHMIGT_VON", "")
-            permission = permission_by_user.get(user)
-            postings = postings_by_vendor.get(vendor_id, [])
+            permission = self.permission_by_user.get(user)
+            postings = self.postings_by_vendor.get(vendor_id, [])
             invoices = [
                 row
                 for row in postings
@@ -198,9 +268,13 @@ class AuditEngine:
                 and permission.data.get("Zahlungslauf")
                 and permission.data.get("Stammdaten/Kreditor anlegen")
             )
-            document_numbers = {row.data.get("BUCHUNGSNUMMER", "") for row in invoices}
+            document_numbers = sorted(
+                {row.data.get("BUCHUNGSNUMMER", "") for row in invoices}
+            )
             related_gl = [
-                row for row in self.gl if row.data.get("BUCHUNGSNUMMER") in document_numbers
+                row
+                for document_number in document_numbers
+                for row in self.gl_by_document.get(document_number, [])
             ]
             same_user_postings = bool(related_gl) and all(
                 row.data.get("BENUTZERKENNUNG") == user for row in related_gl
@@ -227,7 +301,7 @@ class AuditEngine:
                 parse_decimal(row.data.get("BUCHUNGSBETRAG")) % Decimal("1000") == 0
                 for row in expense_lines
             )
-            no_receipts = not receipts_by_vendor.get(vendor_id)
+            no_receipts = not self.receipts_by_vendor.get(vendor_id)
             strong = all(
                 (
                     user and user == approver,
@@ -318,12 +392,11 @@ class AuditEngine:
             r"reparatur|instandsetzung|austausch|generaluberholung|wartung|kalteanlage",
             re.IGNORECASE,
         )
-        assets_by_id = {row.data.get("ANLAGENNUMMER", ""): row for row in self.assets}
         matches: list[tuple[SourceRow, SourceRow]] = []
-        for posting in self.asset_postings:
+        for posting in _unique_rows(self.asset_postings):
             if normalize_text(posting.data.get("BUCHUNGSART")) != "acquisition":
                 continue
-            asset = assets_by_id.get(posting.data.get("ANLAGENNUMMER", ""))
+            asset = self.assets_by_id.get(posting.data.get("ANLAGENNUMMER", ""))
             if not asset:
                 continue
             description = normalize_text(asset.data.get("ANLAGENBEZEICHNUNG"))
@@ -331,6 +404,12 @@ class AuditEngine:
                 matches.append((asset, posting))
         if len(matches) < 2:
             return []
+        matches.sort(
+            key=lambda pair: (
+                pair[1].data.get("BELEGNUMMER", ""),
+                pair[0].data.get("ANLAGENNUMMER", ""),
+            )
+        )
         total = sum(
             (parse_decimal(posting.data.get("BUCHUNGSBETRAG")) for _, posting in matches),
             Decimal("0"),
@@ -379,46 +458,34 @@ class AuditEngine:
         ]
 
     def detect_cutoff_failures(self) -> list[Finding]:
-        receipt_candidates = [
-            row
-            for row in self.receipts
-            if "rechnung offen" in normalize_text(row.data.get("BEMERKUNG"))
-        ]
-        gl_documents = {row.data.get("BUCHUNGSNUMMER", "") for row in self.gl}
         matches: list[tuple[SourceRow, SourceRow]] = []
-        for invoice in self.future_invoices:
+        for invoice in _unique_rows(self.future_invoices):
             invoice_date = parse_date(invoice.data.get("FAKTURADATUM"))
             service_date = parse_date(invoice.data.get("LEISTUNGSDATUM"))
             if not invoice_date or not service_date or invoice_date.year <= service_date.year:
                 continue
-            if invoice.data.get("RECHNUNGSNUMMER") in gl_documents:
+            if invoice.data.get("RECHNUNGSNUMMER") in self.gl_document_numbers:
                 continue
             vendor = invoice.data.get("KREDITOR")
             amount = parse_decimal(invoice.data.get("BETRAG_EUR"))
             receipt = next(
-                (
-                    row
-                    for row in receipt_candidates
-                    if row.data.get("KREDITOR") == vendor
-                    and parse_decimal(row.data.get("BETRAG_EUR")) == amount
-                    and parse_date(row.data.get("WARENEINGANG_DATUM")) == service_date
-                ),
+                iter(self.open_receipts_by_key.get((vendor, amount, service_date), [])),
                 None,
             )
             if receipt:
                 matches.append((invoice, receipt))
         if not matches:
             return []
+        matches.sort(
+            key=lambda pair: (
+                pair[0].data.get("RECHNUNGSNUMMER", ""),
+                pair[0].data.get("KREDITOR", ""),
+            )
+        )
         total = sum(
             (parse_decimal(invoice.data.get("BETRAG_EUR")) for invoice, _ in matches),
             Decimal("0"),
         )
-        accrual_rows = [
-            row
-            for row in self.gl
-            if "ruckstellung" in normalize_text(row.data.get("BUCHUNGSTEXT"))
-            or "unfaktur" in normalize_text(row.data.get("BUCHUNGSTEXT"))
-        ]
         evidence = [
             ref
             for invoice, receipt in matches
@@ -443,7 +510,7 @@ class AuditEngine:
             row.evidence(
                 "SACHKONTONUMMER", "BUCHUNGSDATUM", "BUCHUNGSBETRAG", "BUCHUNGSTEXT"
             )
-            for row in accrual_rows[:2]
+            for row in self.accrual_rows[:2]
         )
         evidence.append(
             _query_evidence(
@@ -495,27 +562,24 @@ class AuditEngine:
         if not threshold_result:
             return [], 0
         threshold, threshold_evidence = threshold_result
-        groups: dict[tuple[str, str], list[SourceRow]] = defaultdict(list)
-        for row in self.vendor_postings:
-            amount = parse_decimal(row.data.get("BUCHUNGSBETRAG"))
-            if amount <= 0 or "zahlung" not in normalize_text(row.data.get("BUCHUNGSTEXT")):
-                continue
-            key = (
-                row.data.get("LIEFERANTENKONTONUMMER", ""),
-                row.data.get("BUCHUNGSDATUM", ""),
-            )
-            groups[key].append(row)
-
         findings: list[Finding] = []
         suppressed = 0
-        for (vendor, booking_date), rows in groups.items():
-            near = [
-                row
-                for row in rows
-                if threshold * Decimal("0.90")
-                <= parse_decimal(row.data.get("BUCHUNGSBETRAG"))
-                < threshold
-            ]
+        for vendor, booking_date in sorted(self.payment_groups):
+            rows = self.payment_groups[(vendor, booking_date)]
+            near = sorted(
+                (
+                    row
+                    for row in rows
+                    if threshold * Decimal("0.90")
+                    <= parse_decimal(row.data.get("BUCHUNGSBETRAG"))
+                    < threshold
+                ),
+                key=lambda row: (
+                    row.data.get("BUCHUNGSNUMMER", ""),
+                    str(row.source),
+                    row.row_number,
+                ),
+            )
             if len(near) < 3:
                 if near:
                     suppressed += 1

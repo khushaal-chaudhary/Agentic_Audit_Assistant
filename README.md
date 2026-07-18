@@ -41,3 +41,8 @@ ledger embeddings. The UI reports credit limits explicitly if Cognee still rejec
 
 The demo is local-first and needs no paid infrastructure. A Cloud Run-ready container is retained as
 an optional deployment target. See `docs/architecture.md`.
+
+## Audit logic
+
+The living specification for implemented rules, false-positive suppression, known limitations, and
+required tests is in [docs/deterministic-rules.md](docs/deterministic-rules.md).

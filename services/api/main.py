@@ -13,7 +13,8 @@ from fastapi.responses import FileResponse
 from audit_core import DossierReport, analyze_dossier
 from audit_core.integrations import CogneeClient, integration_status
 from audit_core.qa import GroundedAnswer, answer_question
-from audit_core.parsers import locate_dossier_root
+from audit_core.parsers import file_sha256, locate_dossier_root
+from audit_core.rules import RULE_CATALOG, RuleDefinition
 from services.api.jobs import JobStatus, JobStore
 
 
@@ -27,6 +28,15 @@ JOBS = JobStore(REPO_ROOT / "data" / "runtime" / "dossiers")
 
 class QuestionRequest(BaseModel):
     question: str = Field(min_length=2, max_length=500)
+
+
+class DocumentSummary(BaseModel):
+    path: str
+    name: str
+    extension: str
+    size_bytes: int
+    sha256: str
+    evidence_locations: int
 
 
 app = FastAPI(
@@ -167,6 +177,33 @@ def dossier_report(job_id: str) -> DossierReport:
     return _report(job_id)
 
 
+@app.get("/api/dossiers/{job_id}/documents", response_model=list[DocumentSummary])
+def dossier_documents(job_id: str) -> list[DocumentSummary]:
+    report = _report(job_id)
+    try:
+        root = JOBS.source_root(job_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=409, detail="Dossier sources are not ready") from exc
+    evidence_counts: dict[str, int] = {}
+    for finding in report.findings:
+        for reference in finding.evidence:
+            evidence_counts[reference.document] = (
+                evidence_counts.get(reference.document, 0) + 1
+            )
+    return [
+        DocumentSummary(
+            path=path.relative_to(root).as_posix(),
+            name=path.name,
+            extension=path.suffix.casefold().lstrip(".") or "file",
+            size_bytes=path.stat().st_size,
+            sha256=file_sha256(str(path)),
+            evidence_locations=evidence_counts.get(path.relative_to(root).as_posix(), 0),
+        )
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    ]
+
+
 @app.get("/api/dossiers/{job_id}/documents/{document_path:path}")
 def dossier_document(job_id: str, document_path: str) -> FileResponse:
     _job(job_id)
@@ -213,6 +250,11 @@ def sync_dossier_to_cognee(job_id: str) -> dict:
 @app.get("/api/integrations/status")
 def integrations_status() -> dict[str, dict[str, str | bool]]:
     return integration_status()
+
+
+@app.get("/api/rules", response_model=list[RuleDefinition])
+def rules_catalog() -> list[RuleDefinition]:
+    return RULE_CATALOG
 
 
 # Compatibility endpoints retained for scripts created against the first local baseline.
