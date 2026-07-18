@@ -48,3 +48,6 @@ an optional deployment target. See `docs/architecture.md`.
 
 The living specification for implemented rules, false-positive suppression, known limitations, and
 required tests is in [docs/deterministic-rules.md](docs/deterministic-rules.md).
+
+For a non-technical product explanation, common questions, and a suggested demo narrative, see
+[docs/layman-explainer.md](docs/layman-explainer.md).
