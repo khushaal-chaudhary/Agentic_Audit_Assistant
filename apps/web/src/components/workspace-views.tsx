@@ -1,8 +1,15 @@
+"use client";
+
+import { useState } from "react";
+
 import type {
   DocumentSummary,
+  Finding,
   IntegrationStatus,
   JobStatus,
   Report,
+  ReviewDisposition,
+  ReviewStatus,
   RuleDefinition,
   WorkspaceView,
 } from "@/lib/types";
@@ -15,9 +22,17 @@ type Props = {
   integrations: IntegrationStatus | null;
   documents: DocumentSummary[];
   rules: RuleDefinition[];
+  reviews: ReviewDisposition[];
+  reviewSavingId?: string;
   apiUrl: string;
   jobId?: string;
   onNavigate: (view: WorkspaceView) => void;
+  onOpenFinding: (findingId: string) => void;
+  onReviewUpdate: (
+    findingId: string,
+    status: ReviewStatus,
+    note: string,
+  ) => Promise<void>;
 };
 
 function EmptyDossier({ onNavigate }: { onNavigate: (view: WorkspaceView) => void }) {
@@ -419,32 +434,148 @@ function Analysis({
   );
 }
 
+function ReviewRow({
+  finding,
+  review,
+  saving,
+  onOpenFinding,
+  onReviewUpdate,
+}: {
+  finding: Finding;
+  review?: ReviewDisposition;
+  saving: boolean;
+  onOpenFinding: Props["onOpenFinding"];
+  onReviewUpdate: Props["onReviewUpdate"];
+}) {
+  const [note, setNote] = useState(review?.note ?? "");
+  const status = review?.status ?? "pending";
+
+  const chipClass =
+    status === "confirmed"
+      ? "failed"
+      : status === "dismissed"
+        ? "passed"
+        : "review";
+  const statusLabel =
+    status === "confirmed"
+      ? "Confirmed exception"
+      : status === "dismissed"
+        ? "Dismissed"
+        : "Needs review";
+
+  return (
+    <article className="border-b border-[var(--line)] p-5">
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <button
+          className="min-w-0 flex-1 text-left"
+          onClick={() => onOpenFinding(finding.id)}
+        >
+          <span className="block text-sm font-medium hover:text-[var(--accent)]">
+            {finding.title}
+          </span>
+          <span className="mt-1 block font-mono text-[10px] text-[var(--muted)]">
+            {finding.rule_id}
+          </span>
+        </button>
+        <span className={"result-chip " + chipClass}>{statusLabel}</span>
+      </div>
+      <label className="mt-4 block">
+        <span className="text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--muted)]">
+          Auditor rationale
+        </span>
+        <textarea
+          aria-label={"Review note for " + finding.title}
+          className="mt-2 min-h-20 w-full resize-y rounded-lg border border-[var(--line)] bg-white px-3 py-2 text-xs leading-5 outline-none focus:border-[var(--accent)]"
+          onChange={(event) => setNote(event.target.value)}
+          placeholder="Record corroboration, follow-up, or the reason this exception is dismissed."
+          value={note}
+        />
+      </label>
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <button
+          className="rounded-lg bg-[var(--green)] px-3 py-2 text-xs font-semibold text-white disabled:opacity-40"
+          disabled={saving}
+          onClick={() => onReviewUpdate(finding.id, "confirmed", note)}
+        >
+          Confirm exception
+        </button>
+        <button
+          className="rounded-lg border border-[var(--line-strong)] bg-white px-3 py-2 text-xs font-semibold disabled:opacity-40"
+          disabled={saving || note.trim().length < 5}
+          onClick={() => onReviewUpdate(finding.id, "dismissed", note)}
+        >
+          Dismiss with rationale
+        </button>
+        {status !== "pending" && (
+          <button
+            className="px-2 py-2 text-xs font-semibold text-[var(--muted)] disabled:opacity-40"
+            disabled={saving}
+            onClick={() => onReviewUpdate(finding.id, "pending", note)}
+          >
+            Reset review
+          </button>
+        )}
+        {saving && <span className="text-xs text-[var(--muted)]">Saving…</span>}
+        {review && !saving && (
+          <span className="ml-auto text-[10px] text-[var(--muted)]">
+            {review.reviewer} · {new Date(review.updated_at).toLocaleString()}
+          </span>
+        )}
+      </div>
+    </article>
+  );
+}
+
 function Review({
   report,
+  reviews,
+  reviewSavingId,
   onNavigate,
-}: Pick<Props, "report" | "onNavigate">) {
+  onOpenFinding,
+  onReviewUpdate,
+}: Pick<
+  Props,
+  | "report"
+  | "reviews"
+  | "reviewSavingId"
+  | "onNavigate"
+  | "onOpenFinding"
+  | "onReviewUpdate"
+>) {
   if (!report) return <EmptyDossier onNavigate={onNavigate} />;
+  const byFinding = new Map(reviews.map((review) => [review.finding_id, review]));
+  const confirmed = reviews.filter((review) => review.status === "confirmed").length;
+  const dismissed = reviews.filter((review) => review.status === "dismissed").length;
   return (
     <section className="overflow-hidden rounded-2xl border border-[var(--line)] bg-white shadow-sm">
-      <div className="border-b border-[var(--line)] px-5 py-4">
-        <h2 className="text-sm font-semibold">Auditor review queue</h2>
-        <p className="mt-1 text-xs text-[var(--muted)]">
-          Review persistence and sign-off are the next workflow milestone.
-        </p>
-      </div>
-      {report.findings.length ? report.findings.map((finding) => (
-        <button
-          className="flex w-full items-center justify-between gap-4 border-b border-[var(--line)] px-5 py-4 text-left hover:bg-[var(--soft)]"
-          key={finding.id}
-          onClick={() => onNavigate("findings")}
-        >
-          <span>
-            <span className="block text-sm font-medium">{finding.title}</span>
-            <span className="mt-1 block font-mono text-[10px] text-[var(--muted)]">{finding.rule_id}</span>
+      <div className="flex flex-wrap items-start justify-between gap-3 border-b border-[var(--line)] px-5 py-4">
+        <div>
+          <h2 className="text-sm font-semibold">Auditor review queue</h2>
+          <p className="mt-1 text-xs text-[var(--muted)]">
+            Dispositions persist with this local dossier. Dismissals require a rationale.
+          </p>
+        </div>
+        <div className="flex gap-2">
+          <span className="result-chip review">
+            {report.findings.length - confirmed - dismissed} pending
           </span>
-          <span className="result-chip review">Needs review</span>
-        </button>
-      )) : (
+          <span className="result-chip failed">{confirmed} confirmed</span>
+          <span className="result-chip passed">{dismissed} dismissed</span>
+        </div>
+      </div>
+      {report.findings.length ? report.findings.map((finding) => {
+        const review = byFinding.get(finding.id);
+        return (
+          <ReviewRow
+            finding={finding}
+            key={finding.id + ":" + (review?.updated_at ?? "pending")}
+            onOpenFinding={onOpenFinding}
+            onReviewUpdate={onReviewUpdate}
+            review={review}
+            saving={reviewSavingId === finding.id}
+          />
+        );
+      }) : (
         <p className="p-8 text-center text-sm text-[var(--muted)]">No findings require review.</p>
       )}
     </section>

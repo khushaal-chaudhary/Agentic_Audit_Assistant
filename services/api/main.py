@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 
 import httpx
 from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from fastapi.responses import FileResponse
 
 from audit_core import DossierReport, analyze_dossier
@@ -15,7 +17,7 @@ from audit_core.integrations import CogneeClient, integration_status
 from audit_core.qa import GroundedAnswer, answer_question
 from audit_core.parsers import file_sha256, locate_dossier_root
 from audit_core.rules import RULE_CATALOG, RuleDefinition
-from services.api.jobs import JobStatus, JobStore
+from services.api.jobs import JobStatus, JobStore, ReviewDisposition
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -24,6 +26,16 @@ DEFAULT_SAMPLE = (
     REPO_ROOT / "Uebungsdaten_Muster_Verpackungen" / "Uebungsdaten Muster Verpackungen"
 )
 JOBS = JobStore(REPO_ROOT / "data" / "runtime" / "dossiers")
+LOCAL_DEMO_ORIGINS = ("http://localhost:3000", "http://127.0.0.1:3000")
+
+
+def allowed_origins() -> list[str]:
+    configured = [
+        origin.strip()
+        for origin in os.getenv("ALLOWED_ORIGINS", "").split(",")
+        if origin.strip()
+    ]
+    return list(dict.fromkeys([*LOCAL_DEMO_ORIGINS, *configured]))
 
 
 class QuestionRequest(BaseModel):
@@ -39,6 +51,22 @@ class DocumentSummary(BaseModel):
     evidence_locations: int
 
 
+class ReviewRequest(BaseModel):
+    status: Literal["pending", "confirmed", "dismissed"]
+    note: str = Field(default="", max_length=1000)
+    reviewer: str = Field(default="Local auditor", min_length=1, max_length=80)
+
+    @model_validator(mode="after")
+    def require_dismissal_rationale(self) -> "ReviewRequest":
+        self.note = self.note.strip()
+        self.reviewer = self.reviewer.strip()
+        if not self.reviewer:
+            raise ValueError("Reviewer is required")
+        if self.status == "dismissed" and len(self.note) < 5:
+            raise ValueError("Dismissed findings require a rationale of at least 5 characters")
+        return self
+
+
 app = FastAPI(
     title="Agentic Audit Assistant API",
     version="0.2.0",
@@ -46,13 +74,9 @@ app = FastAPI(
 )
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        origin.strip()
-        for origin in os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",")
-        if origin.strip()
-    ],
+    allow_origins=allowed_origins(),
     allow_credentials=True,
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "PUT"],
     allow_headers=["*"],
 )
 
@@ -175,6 +199,39 @@ def dossier_status(job_id: str) -> JobStatus:
 @app.get("/api/dossiers/{job_id}/report", response_model=DossierReport)
 def dossier_report(job_id: str) -> DossierReport:
     return _report(job_id)
+
+
+@app.get(
+    "/api/dossiers/{job_id}/reviews",
+    response_model=list[ReviewDisposition],
+)
+def dossier_reviews(job_id: str) -> list[ReviewDisposition]:
+    _report(job_id)
+    return JOBS.reviews(job_id)
+
+
+@app.put(
+    "/api/dossiers/{job_id}/reviews/{finding_id}",
+    response_model=ReviewDisposition,
+)
+def update_dossier_review(
+    job_id: str,
+    finding_id: str,
+    request: ReviewRequest,
+) -> ReviewDisposition:
+    report = _report(job_id)
+    if not any(finding.id == finding_id for finding in report.findings):
+        raise HTTPException(status_code=404, detail="Finding not found in this dossier")
+    return JOBS.save_review(
+        job_id,
+        ReviewDisposition(
+            finding_id=finding_id,
+            status=request.status,
+            note=request.note,
+            reviewer=request.reviewer,
+            updated_at=datetime.now(timezone.utc),
+        ),
+    )
 
 
 @app.get("/api/dossiers/{job_id}/documents", response_model=list[DocumentSummary])

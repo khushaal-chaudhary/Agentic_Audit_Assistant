@@ -13,11 +13,14 @@ import type {
   IntegrationStatus,
   JobStatus,
   Report,
+  ReviewDisposition,
+  ReviewStatus,
   RuleDefinition,
   WorkspaceView as WorkspaceViewName,
 } from "@/lib/types";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000";
+const LAST_JOB_KEY = "auditgraph:lastJobId";
 const sleep = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
 async function apiError(response: Response) {
@@ -46,6 +49,7 @@ export default function Home() {
   const [integrations, setIntegrations] = useState<IntegrationStatus | null>(null);
   const [rules, setRules] = useState<RuleDefinition[]>([]);
   const [documents, setDocuments] = useState<DocumentSummary[]>([]);
+  const [reviews, setReviews] = useState<ReviewDisposition[]>([]);
   const [files, setFiles] = useState<File[]>([]);
   const [jobId, setJobId] = useState<string>();
   const [jobStatus, setJobStatus] = useState<JobStatus | null>(null);
@@ -53,6 +57,7 @@ export default function Home() {
   const [syncing, setSyncing] = useState(false);
   const [focusMode, setFocusMode] = useState(false);
   const [findingQuery, setFindingQuery] = useState("");
+  const [reviewSavingId, setReviewSavingId] = useState<string>();
   const [error, setError] = useState<string>();
 
   const selected = useMemo(
@@ -85,13 +90,54 @@ export default function Home() {
       });
   }, []);
 
+  useEffect(() => {
+    async function restoreSavedDossier() {
+      const savedJobId = window.localStorage.getItem(LAST_JOB_KEY);
+      if (!savedJobId) return;
+      try {
+        const statusResponse = await fetch(
+          API_URL + "/api/dossiers/" + savedJobId + "/status",
+        );
+        if (!statusResponse.ok) throw new Error("Saved dossier is unavailable");
+        const current = (await statusResponse.json()) as JobStatus;
+        setJobId(current.id);
+        setJobStatus(current);
+        if (!current.report_ready) return;
+        const [reportResponse, documentsResponse, reviewsResponse] = await Promise.all([
+          fetch(API_URL + "/api/dossiers/" + current.id + "/report"),
+          fetch(API_URL + "/api/dossiers/" + current.id + "/documents"),
+          fetch(API_URL + "/api/dossiers/" + current.id + "/reviews"),
+        ]);
+        if (!reportResponse.ok || !documentsResponse.ok || !reviewsResponse.ok) {
+          throw new Error("Saved dossier data is unavailable");
+        }
+        const data = (await reportResponse.json()) as Report;
+        setDocuments((await documentsResponse.json()) as DocumentSummary[]);
+        setReviews((await reviewsResponse.json()) as ReviewDisposition[]);
+        setReport(data);
+        setSelectedId(data.findings[0]?.id);
+      } catch {
+        window.localStorage.removeItem(LAST_JOB_KEY);
+      }
+    }
+
+    void restoreSavedDossier();
+  }, []);
+
   async function loadDocuments(currentJobId: string) {
     const response = await fetch(API_URL + "/api/dossiers/" + currentJobId + "/documents");
     if (!response.ok) throw new Error(await apiError(response));
     setDocuments((await response.json()) as DocumentSummary[]);
   }
 
+  async function loadReviews(currentJobId: string) {
+    const response = await fetch(API_URL + "/api/dossiers/" + currentJobId + "/reviews");
+    if (!response.ok) throw new Error(await apiError(response));
+    setReviews((await response.json()) as ReviewDisposition[]);
+  }
+
   async function waitForReport(initial: JobStatus) {
+    window.localStorage.setItem(LAST_JOB_KEY, initial.id);
     setJobId(initial.id);
     setJobStatus(initial);
     for (let attempt = 0; attempt < 180; attempt += 1) {
@@ -110,7 +156,7 @@ export default function Home() {
         const data = (await reportResponse.json()) as Report;
         setReport(data);
         setSelectedId(data.findings[0]?.id);
-        await loadDocuments(initial.id);
+        await Promise.all([loadDocuments(initial.id), loadReviews(initial.id)]);
         setActiveView(data.findings.length ? "findings" : "overview");
         return;
       }
@@ -124,6 +170,7 @@ export default function Home() {
     setError(undefined);
     setReport(null);
     setDocuments([]);
+    setReviews([]);
     try {
       let response: Response;
       if (files.length) {
@@ -159,6 +206,41 @@ export default function Home() {
     }
   }
 
+  function openFinding(findingId: string) {
+    setSelectedId(findingId);
+    setActiveView("findings");
+  }
+
+  async function updateReview(
+    findingId: string,
+    status: ReviewStatus,
+    note: string,
+  ) {
+    if (!jobId) return;
+    setReviewSavingId(findingId);
+    setError(undefined);
+    try {
+      const response = await fetch(
+        API_URL + "/api/dossiers/" + jobId + "/reviews/" + findingId,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status, note, reviewer: "Local auditor" }),
+        },
+      );
+      if (!response.ok) throw new Error(await apiError(response));
+      const saved = (await response.json()) as ReviewDisposition;
+      setReviews((current) => [
+        ...current.filter((item) => item.finding_id !== findingId),
+        saved,
+      ]);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Review disposition could not be saved.");
+    } finally {
+      setReviewSavingId(undefined);
+    }
+  }
+
   const notTestable = report?.procedures.filter((item) => item.status === "not_testable") ?? [];
   const noException =
     report?.procedures.filter(
@@ -178,8 +260,8 @@ export default function Home() {
         onSelect={setActiveView}
       />
       <div className="flex min-w-0 flex-1 flex-col">
-        <header className="flex h-[60px] shrink-0 items-center justify-between border-b border-[var(--line)] bg-white px-4 md:px-[22px]">
-          <div className="min-w-0">
+        <header className="flex min-h-[60px] shrink-0 items-center justify-between border-b border-[var(--line)] bg-white px-4 py-2 md:h-[60px] md:px-[22px] md:py-0">
+          <div className="hidden min-w-0 md:block">
             <p className="truncate text-sm font-semibold">{metadata.title}</p>
             <p className="mt-0.5 truncate text-xs text-[var(--muted)]">
               {report
@@ -187,10 +269,10 @@ export default function Home() {
                 : metadata.subtitle}
             </p>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex min-w-0 flex-1 items-center gap-2 md:flex-none">
             <select
               aria-label="Workspace view"
-              className="rounded-lg border border-[var(--line)] bg-white px-2 py-2 text-xs md:hidden"
+              className="min-w-0 flex-1 rounded-lg border border-[var(--line)] bg-white px-2 py-2 text-xs md:hidden"
               onChange={(event) => setActiveView(event.target.value as WorkspaceViewName)}
               value={activeView}
             >
@@ -199,7 +281,7 @@ export default function Home() {
               ))}
             </select>
             <button
-              className="rounded-lg border border-[var(--line-strong)] bg-white px-3 py-2 text-xs font-semibold hover:bg-[var(--soft)]"
+              className="shrink-0 rounded-lg border border-[var(--line-strong)] bg-white px-3 py-2 text-xs font-semibold hover:bg-[var(--soft)]"
               disabled={loading}
               onClick={runDossier}
             >
@@ -289,9 +371,13 @@ export default function Home() {
                 integrations={integrations}
                 documents={documents}
                 rules={rules}
+                reviews={reviews}
+                reviewSavingId={reviewSavingId}
                 apiUrl={API_URL}
                 jobId={jobId}
                 onNavigate={setActiveView}
+                onOpenFinding={openFinding}
+                onReviewUpdate={updateReview}
               />
             )}
           </div>

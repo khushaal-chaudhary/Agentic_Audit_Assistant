@@ -12,12 +12,15 @@
 
 - Next.js UI runs locally on port 3000.
 - FastAPI and document processing run locally on port 8000.
-- Uploaded dossiers, job status, and evidence reports live under ignored `data/runtime`.
+- Uploaded dossiers, job status, evidence reports, and auditor dispositions live under ignored
+  `data/runtime`.
 - The backend makes outbound calls to Cognee Cloud and OpenAI only when keys are configured.
 - The sample deterministic checks run with no cloud credentials.
 
 For a hosted UI talking to the laptop, expose only the API through a temporary free HTTPS tunnel and
 set `NEXT_PUBLIC_API_URL` before building the web app. Running both services locally is the default.
+Both `localhost:3000` and `127.0.0.1:3000` are accepted in local mode; additional hosted origins
+can be appended with `ALLOWED_ORIGINS`.
 
 ## Optional production topology
 

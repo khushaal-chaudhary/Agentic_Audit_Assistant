@@ -102,6 +102,16 @@ export type RuleDefinition = {
   evidence_requirements: string[];
 };
 
+export type ReviewStatus = "pending" | "confirmed" | "dismissed";
+
+export type ReviewDisposition = {
+  finding_id: string;
+  status: ReviewStatus;
+  note: string;
+  reviewer: string;
+  updated_at: string;
+};
+
 export function money(value?: string, currency = "EUR") {
   if (!value) return "—";
   const negative = value.startsWith("-");

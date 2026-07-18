@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import json
 import shutil
 import threading
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, TypeAdapter
 
 from audit_core.models import DossierReport
 
@@ -22,6 +24,14 @@ class JobStatus(BaseModel):
     updated_at: datetime
     report_ready: bool = False
     error: str | None = None
+
+
+class ReviewDisposition(BaseModel):
+    finding_id: str
+    status: Literal["pending", "confirmed", "dismissed"]
+    note: str = ""
+    reviewer: str
+    updated_at: datetime
 
 
 class JobStore:
@@ -88,6 +98,31 @@ class JobStore:
         if not path.exists():
             raise FileNotFoundError(job_id)
         return DossierReport.model_validate_json(path.read_text(encoding="utf-8"))
+
+    def reviews(self, job_id: str) -> list[ReviewDisposition]:
+        self.status(job_id)
+        path = self.job_dir(job_id) / "reviews.json"
+        if not path.exists():
+            return []
+        return TypeAdapter(list[ReviewDisposition]).validate_json(
+            path.read_text(encoding="utf-8")
+        )
+
+    def save_review(
+        self, job_id: str, review: ReviewDisposition
+    ) -> ReviewDisposition:
+        with self._lock:
+            reviews = {item.finding_id: item for item in self.reviews(job_id)}
+            reviews[review.finding_id] = review
+            ordered = sorted(reviews.values(), key=lambda item: item.finding_id)
+            self._atomic_write(
+                self.job_dir(job_id) / "reviews.json",
+                json.dumps(
+                    [item.model_dump(mode="json") for item in ordered],
+                    indent=2,
+                ),
+            )
+        return review
 
     def prepare_source(self, job_id: str) -> Path:
         incoming = self.incoming_dir(job_id)

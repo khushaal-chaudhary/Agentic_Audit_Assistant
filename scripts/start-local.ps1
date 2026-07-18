@@ -28,6 +28,6 @@ $Web = Start-Process -FilePath "npm.cmd" -ArgumentList @(
 Set-Content -LiteralPath (Join-Path $Runtime "api.pid") -Value $Api.Id
 Set-Content -LiteralPath (Join-Path $Runtime "web.pid") -Value $Web.Id
 
-Write-Host "Audit API: http://localhost:8000"
-Write-Host "Audit UI:  http://localhost:3000"
+Write-Host "Audit API: http://127.0.0.1:8000"
+Write-Host "Audit UI:  http://127.0.0.1:3000"
 Write-Host "Stop both with .\scripts\stop-local.ps1"
