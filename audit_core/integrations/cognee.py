@@ -15,7 +15,7 @@ from audit_core.models import DossierReport
 from audit_core.parsers import decode_text
 
 
-PROJECTION_VERSION = "projection-v5"
+PROJECTION_VERSION = "projection-v6"
 
 
 class CogneeClient:
@@ -50,7 +50,17 @@ class CogneeClient:
         include_sources: bool = False,
     ) -> dict[str, Any]:
         hashes = sorted(
-            {reference.sha256 for finding in report.findings for reference in finding.evidence}
+            {
+                reference.sha256
+                for finding in report.findings
+                for reference in finding.evidence
+            }
+            | {
+                reference.sha256
+                for reference in (
+                    report.ingestion.source_passages if report.ingestion else []
+                )
+            }
         )
         fingerprint = hashlib.sha256(
             (PROJECTION_VERSION + "|" + "|".join(hashes)).encode()

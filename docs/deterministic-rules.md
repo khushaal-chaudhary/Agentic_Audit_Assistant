@@ -71,6 +71,8 @@ evidence such as permissions, policies, or absence queries.
 | CAPITALISED_REPAIRS | misstatement | high | matching asset additions as a group |
 | UNRECORDED_CUTOFF_LIABILITIES | misstatement | high | matched subsequent invoices as a group |
 | SPLIT_PAYMENTS_BELOW_THRESHOLD | control | medium | vendor and booking date |
+| EXPORT_COMPLETENESS_RECONCILIATION | reconciliation | high | ledger population |
+| MANUAL_JOURNAL_APPROVAL_VIOLATION | control | high | capture/journal ID |
 
 Confidence values are currently fixed rule metadata, not statistical probabilities.
 

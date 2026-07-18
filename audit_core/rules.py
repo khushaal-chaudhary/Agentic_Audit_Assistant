@@ -140,6 +140,67 @@ IMPLEMENTED_RULES = [
             "Every qualifying payment row",
         ],
     ),
+    RuleDefinition(
+        rule_id="EXPORT_COMPLETENESS_RECONCILIATION",
+        name="Export completeness reconciliation",
+        status="implemented",
+        category="reconciliation",
+        severity="high",
+        objective=(
+            "Reconcile independent general-ledger population declarations to the physical "
+            "GDPdU data-row count."
+        ),
+        required_inputs=[
+            "General-ledger GDPdU table",
+            "Export manifest",
+            "Independent IT completeness confirmation",
+        ],
+        publication_conditions=[
+            "A general-ledger row count is extracted from both control documents.",
+            "The physical file is counted using its GDPdU schema.",
+            "At least one of the three counts disagrees.",
+        ],
+        false_positive_guards=[
+            "German and English thousands separators are normalized.",
+            "Schema metadata and header rows are excluded from the physical data-row count.",
+            "Agreement across all three sources remains clean.",
+        ],
+        evidence_requirements=[
+            "Export-manifest PDF page and passage",
+            "IT-confirmation PDF page and passage",
+            "Physical table-count query locator",
+        ],
+    ),
+    RuleDefinition(
+        rule_id="MANUAL_JOURNAL_APPROVAL_VIOLATION",
+        name="Material manual-journal approval violation",
+        status="implemented",
+        category="control",
+        severity="high",
+        objective=(
+            "Identify material manual journals explicitly posted without independent approval."
+        ),
+        required_inputs=[
+            "Manual-origin general-ledger rows",
+            "Journal approval log",
+            "JET planning threshold",
+        ],
+        publication_conditions=[
+            "The approval log explicitly records self-approval, no approver, or a non-approved status.",
+            "The absolute journal volume meets the source-defined JET threshold.",
+            "Capture ID, line count, and absolute journal volume reconcile to manual ledger rows.",
+        ],
+        false_positive_guards=[
+            "Exceptions below the source-defined threshold are suppressed.",
+            "Independently approved journals remain clean.",
+            "System-origin rows and unreconciled log entries are suppressed.",
+        ],
+        evidence_requirements=[
+            "Approval-log row",
+            "Planning passage containing the threshold",
+            "Every positive ledger row contributing to the displayed exposure",
+        ],
+    ),
 ]
 
 

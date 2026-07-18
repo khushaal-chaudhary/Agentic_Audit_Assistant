@@ -44,7 +44,7 @@ function EmptyDossier({ onNavigate }: { onNavigate: (view: WorkspaceView) => voi
         </div>
         <h2 className="mt-4 text-xl font-semibold">Load an evidence dossier</h2>
         <p className="mt-2 text-sm leading-6 text-[var(--muted)]">
-          Run the bundled sample or upload a ZIP to populate this workspace with sourced
+          Run the preloaded final dossier or upload a ZIP to populate this workspace with sourced
           procedures, documents, findings, and review items.
         </p>
         <button className="primary-button mt-5" onClick={() => onNavigate("dossier")}>
@@ -259,15 +259,20 @@ function Documents({
   const exceptions = documents.filter(
     (document) =>
       document.ingestion_status === "ambiguous"
-      || document.ingestion_status === "unsupported",
+      || document.ingestion_status === "unsupported"
+      || document.extraction_status === "partial",
   ).length;
+  const nativePdfPages = documents.reduce(
+    (total, document) => total + (document.extraction_status === "not_applicable" ? 0 : document.extracted_pages),
+    0,
+  );
   return (
     <section className="overflow-hidden rounded-2xl border border-[var(--line)] bg-white shadow-sm">
       <div className="flex items-center justify-between border-b border-[var(--line)] px-5 py-4">
         <div>
           <h2 className="text-sm font-semibold">Source document inventory</h2>
           <p className="mt-1 text-xs text-[var(--muted)]">
-            {documents.length} files retained · {recognized} recognized · {exceptions} need attention
+            {documents.length} files retained · {recognized} recognized · {nativePdfPages} PDF pages extracted · {exceptions} need attention
           </p>
         </div>
         <span className="result-chip passed">Evidence bound</span>
@@ -294,11 +299,20 @@ function Documents({
                   ? "Role: " + document.role.replaceAll("_", " ")
                   : document.ingestion_reason ?? "Inventory only"}
               </span>
+              {document.page_count !== undefined && document.page_count !== null && (
+                <span className="mt-1 block truncate text-[10px] text-[var(--muted)]">
+                  Native PDF text: {document.extracted_pages}/{document.page_count} pages · {document.passage_count} passages
+                </span>
+              )}
             </span>
             <span className="uppercase text-[var(--muted)]">{document.extension}</span>
             <span className="text-[var(--muted)]">{formatBytes(document.size_bytes)}</span>
             <span className={document.evidence_locations ? "font-semibold text-[var(--accent)]" : "text-[var(--muted)]"}>
-              {document.evidence_locations ? document.evidence_locations + " locations" : "Not cited"}
+              {document.evidence_locations
+                ? document.evidence_locations + " locations"
+                : document.passage_count
+                  ? document.passage_count + " passages"
+                  : "Not cited"}
             </span>
           </a>
         ))}

@@ -165,7 +165,7 @@ export default function Home() {
     throw new Error("Dossier processing did not finish within the local demo timeout.");
   }
 
-  async function runDossier() {
+  async function runDossier(kind: "sample" | "final" | "upload") {
     setLoading(true);
     setError(undefined);
     setReport(null);
@@ -173,12 +173,13 @@ export default function Home() {
     setReviews([]);
     try {
       let response: Response;
-      if (files.length) {
+      if (kind === "upload") {
+        if (!files.length) throw new Error("Add at least one source file before running an upload.");
         const form = new FormData();
         files.forEach((file) => form.append("files", file));
         response = await fetch(API_URL + "/api/dossiers", { method: "POST", body: form });
       } else {
-        response = await fetch(API_URL + "/api/dossiers/sample", { method: "POST" });
+        response = await fetch(API_URL + "/api/dossiers/" + kind, { method: "POST" });
       }
       if (!response.ok) throw new Error(await apiError(response));
       await waitForReport((await response.json()) as JobStatus);
@@ -187,6 +188,10 @@ export default function Home() {
     } finally {
       setLoading(false);
     }
+  }
+
+  function runDefault() {
+    void runDossier(files.length ? "upload" : "final");
   }
 
   async function syncCognee() {
@@ -283,7 +288,7 @@ export default function Home() {
             <button
               className="shrink-0 rounded-lg border border-[var(--line-strong)] bg-white px-3 py-2 text-xs font-semibold hover:bg-[var(--soft)]"
               disabled={loading}
-              onClick={runDossier}
+              onClick={runDefault}
             >
               {loading ? "Running…" : "Run agent"}
             </button>
@@ -300,7 +305,9 @@ export default function Home() {
                 fileCount={files.length}
                 jobStatus={jobStatus}
                 onFiles={setFiles}
-                onRun={runDossier}
+                onRunSample={() => void runDossier("sample")}
+                onRunFinal={() => void runDossier("final")}
+                onRunUpload={() => void runDossier("upload")}
                 onSync={syncCognee}
               />
             )}

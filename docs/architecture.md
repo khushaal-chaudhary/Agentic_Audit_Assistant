@@ -9,6 +9,8 @@
    displayed total from exact source locators.
 5. Missing support is represented as `not_testable`; it is not evidence of fraud by itself.
 6. Input roles resolve from schemas/content; ambiguous matches are never selected heuristically.
+7. Native PDF text is stored as page-and-line evidence passages. Pages without native text are
+   marked unreadable; no OCR result is implied.
 
 Reports using the earlier amount-without-terms schema fail closed and must be rerun with the current
 engine before their figures can be displayed or projected.
@@ -20,7 +22,7 @@ engine before their figures can be displayed or projected.
 - Uploaded dossiers, job status, evidence reports, and auditor dispositions live under ignored
   `data/runtime`.
 - Each report carries ingestion coverage for recognized, ambiguous, unclassified, and unsupported
-  documents.
+  documents, plus native PDF page/passages and partial/unreadable extraction states.
 - The backend makes outbound calls to Cognee Cloud and OpenAI only when keys are configured.
 - The sample deterministic checks run with no cloud credentials.
 
@@ -43,6 +45,7 @@ an eligible billing account is available.
 ## Cost controls
 
 - Hash and cache document extraction results.
+- Extract native PDF text locally; do not spend model tokens recreating page text.
 - Run deterministic rules before any model call.
 - Send only validated finding context to OpenAI.
 - Cognee receives the typed evidence-graph projection and validated report excerpts by default;

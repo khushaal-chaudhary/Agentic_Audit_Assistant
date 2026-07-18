@@ -7,7 +7,9 @@ type Props = {
   fileCount: number;
   jobStatus: JobStatus | null;
   onFiles: (files: File[]) => void;
-  onRun: () => void;
+  onRunSample: () => void;
+  onRunFinal: () => void;
+  onRunUpload: () => void;
   onSync: () => void;
 };
 
@@ -18,14 +20,16 @@ export function AgentBar({
   fileCount,
   jobStatus,
   onFiles,
-  onRun,
+  onRunSample,
+  onRunFinal,
+  onRunUpload,
   onSync,
 }: Props) {
   const detail = loading && jobStatus
     ? `${jobStatus.message} · ${jobStatus.progress}%`
     : fileCount
       ? `${fileCount} local source file(s) selected · ZIP recommended`
-      : "Run the sample dossier or upload a ZIP that preserves its folder structure";
+      : "Choose a preloaded dossier or upload a ZIP that preserves its folder structure";
 
   return (
     <section className="overflow-hidden rounded-2xl border border-[var(--line)] bg-white shadow-sm">
@@ -53,13 +57,32 @@ export function AgentBar({
         >
           {syncing ? "Syncing…" : "Sync graph"}
         </button>
-        <button
-          className="rounded-lg bg-[var(--ink)] px-4 py-2 text-xs font-semibold text-white"
-          onClick={onRun}
-          disabled={loading}
-        >
-          {loading ? "Running…" : fileCount ? "Analyze upload ↑" : "Run sample ↑"}
-        </button>
+        {fileCount ? (
+          <button
+            className="rounded-lg bg-[var(--ink)] px-4 py-2 text-xs font-semibold text-white disabled:opacity-40"
+            onClick={onRunUpload}
+            disabled={loading}
+          >
+            {loading ? "Running…" : "Analyze upload ↑"}
+          </button>
+        ) : (
+          <>
+            <button
+              className="rounded-lg border border-[var(--line-strong)] px-4 py-2 text-xs font-semibold hover:bg-[var(--soft)] disabled:opacity-40"
+              onClick={onRunSample}
+              disabled={loading}
+            >
+              Run sample dataset
+            </button>
+            <button
+              className="rounded-lg bg-[var(--ink)] px-4 py-2 text-xs font-semibold text-white disabled:opacity-40"
+              onClick={onRunFinal}
+              disabled={loading}
+            >
+              {loading ? "Running…" : "Run final dataset ↑"}
+            </button>
+          </>
+        )}
       </div>
       {loading && (
         <div className="h-1 bg-[var(--soft)]">

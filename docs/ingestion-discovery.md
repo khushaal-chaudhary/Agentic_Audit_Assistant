@@ -27,6 +27,10 @@ The engine never selects the first ambiguous match.
 | future_vendor_invoices | Invoice number, vendor, invoice/service dates, amount |
 | payment_policy | Payment-approval and dual-control language |
 
+Native PDFs may also receive descriptive content roles: `financial_statements`, `export_manifest`,
+or `it_completeness_confirmation`. These roles make coverage visible and searchable; they are not
+yet required inputs to a deterministic detector.
+
 GDPdU tables use the columns declared in index.xml. CSV/TXT files use their header row. XLSX
 workbooks are inspected for a matching header row. DOCX policy documents are matched from normalized
 paragraph content.
@@ -49,12 +53,26 @@ Every retained file is classified as:
 - unclassified: retained, but no implemented rule consumes its schema;
 - unsupported: retained for source access, but fact extraction is not implemented.
 
+PDFs additionally expose an extraction state:
+
+- native: every page contained extractable native text;
+- partial: some pages contained native text and some did not;
+- unreadable: no page contained native text;
+- not_applicable: the document is not a PDF.
+
+Native text is split into bounded passages. Every passage carries the PDF hash, one-based page
+number, extracted line range, and exact excerpt. Document links include the page anchor. The report
+keeps these passages so later search or graph projection can use source-located text instead of an
+unsourced summary.
+
 The document inventory exposes these states. Unclassified files are not evidence that ingestion
 failed; they may belong to rule families that are still planned.
 
 ## Current boundary
 
-- General PDF fact extraction and OCR are not implemented.
+- Native PDF text extraction is implemented. OCR is intentionally disabled, so scanned/image-only
+  pages remain unreadable and cannot support a claim.
+- PDF content roles are descriptive until a detector declares them as required input.
 - Alias coverage is finite and must be expanded with clean regression fixtures.
 - One physical workbook is currently assigned at file level, not as several independent role-bearing
   sheets.

@@ -9,8 +9,8 @@ from pathlib import Path
 from docx import Document
 from openpyxl import load_workbook
 
-from .models import IngestionCoverage, IngestionDocument, IngestionRole
-from .parsers import decode_text, normalize_text
+from .models import EvidenceRef, IngestionCoverage, IngestionDocument, IngestionRole
+from .parsers import PdfExtraction, decode_text, normalize_text, read_pdf_passages
 
 
 @dataclass(frozen=True)
@@ -33,6 +33,23 @@ ROLE_SPECS = (
             "BUCHUNGSBETRAG": _aliases("BUCHUNGSBETRAG", "POSTING_AMOUNT", "AMOUNT"),
             "BUCHUNGSTEXT": _aliases("BUCHUNGSTEXT", "POSTING_TEXT", "DESCRIPTION"),
             "BENUTZERKENNUNG": _aliases("BENUTZERKENNUNG", "USER_ID", "POSTED_BY"),
+        },
+    ),
+    RoleSpec(
+        "manual_journal_ledger",
+        {
+            "SACHKONTONUMMER": _aliases("SACHKONTONUMMER", "GL_ACCOUNT", "ACCOUNT_NUMBER"),
+            "BUCHUNGSNUMMER": _aliases("BUCHUNGSNUMMER", "DOCUMENT_NUMBER", "ENTRY_NUMBER"),
+            "BUCHUNGSDATUM": _aliases("BUCHUNGSDATUM", "POSTING_DATE", "BOOKING_DATE"),
+            "BUCHUNGSBETRAG": _aliases("BUCHUNGSBETRAG", "POSTING_AMOUNT", "AMOUNT"),
+            "BUCHUNGSTEXT": _aliases("BUCHUNGSTEXT", "POSTING_TEXT", "DESCRIPTION"),
+            "BENUTZERKENNUNG": _aliases("BENUTZERKENNUNG", "USER_ID", "POSTED_BY"),
+            "ERFASSUNGSNUMMER": _aliases(
+                "ERFASSUNGSNUMMER", "CAPTURE_NUMBER", "JOURNAL_ID"
+            ),
+            "PERIODENZUGEHÖRIGKEIT": _aliases(
+                "PERIODENZUGEHÖRIGKEIT", "SOURCE_TYPE", "JOURNAL_ORIGIN"
+            ),
         },
     ),
     RoleSpec(
@@ -114,9 +131,32 @@ ROLE_SPECS = (
             "BETRAG_EUR": _aliases("BETRAG_EUR", "AMOUNT_EUR", "AMOUNT"),
         },
     ),
+    RoleSpec(
+        "journal_approvals",
+        {
+            "ERFASSUNGSNUMMER": _aliases(
+                "ERFASSUNGSNUMMER", "CAPTURE_NUMBER", "JOURNAL_ID"
+            ),
+            "JOURNALNAME": _aliases("JOURNALNAME", "JOURNAL_NAME"),
+            "ANZAHL_ZEILEN": _aliases("ANZAHL_ZEILEN", "LINE_COUNT"),
+            "SUMME_ABS_EUR": _aliases(
+                "SUMME_ABS_EUR", "ABSOLUTE_AMOUNT_EUR", "ABSOLUTE_JOURNAL_AMOUNT"
+            ),
+            "ERSTELLER": _aliases("ERSTELLER", "CREATOR", "CREATED_BY"),
+            "ERFASST_AM": _aliases("ERFASST_AM", "CREATED_DATE"),
+            "ERFASST_UM": _aliases("ERFASST_UM", "CREATED_TIME"),
+            "FREIGEBER": _aliases("FREIGEBER", "APPROVER", "APPROVED_BY"),
+            "FREIGABESTATUS": _aliases("FREIGABESTATUS", "APPROVAL_STATUS"),
+        },
+    ),
 )
 
-REQUIRED_ROLES = tuple(spec.role for spec in ROLE_SPECS) + ("payment_policy",)
+REQUIRED_ROLES = tuple(spec.role for spec in ROLE_SPECS) + (
+    "payment_policy",
+    "jet_policy",
+    "export_manifest",
+    "it_completeness_confirmation",
+)
 
 
 def _token(value: str) -> str:
@@ -202,9 +242,55 @@ def _policy_match(path: Path) -> bool:
     )
 
 
+def _jet_policy_match(path: Path) -> bool:
+    document = Document(path)
+    text = normalize_text(" ".join(paragraph.text for paragraph in document.paragraphs))
+    return (
+        ("journal entry testing" in text or "nichtaufgriffsgrenze jet" in text)
+        and ("nichtaufgriffsgrenze" in text or "clearly trivial threshold" in text)
+    )
+
+
+def pdf_role_matches(passages: list[EvidenceRef]) -> list[str]:
+    """Return conservative, descriptive PDF roles from native text only."""
+    text = normalize_text("\n".join(passage.excerpt for passage in passages))
+    if not text:
+        return []
+    if (
+        ("exportprotokoll" in text or "export log" in text)
+        and "sha-256" in text
+        and ("datensatze" in text or "records" in text)
+    ):
+        return ["export_manifest"]
+    if (
+        ("vollstandigkeit" in text or "completeness" in text)
+        and ("unveranderbarkeit" in text or "immutability" in text)
+        and "journal" in text
+    ):
+        return ["it_completeness_confirmation"]
+    if (
+        (
+            ("bilanz" in text or "balance sheet" in text)
+            and (
+                "gewinn- und verlustrechnung" in text
+                or "income statement" in text
+                or "profit and loss" in text
+            )
+        )
+        or (
+            "summe aktiva" in text
+            and "summe passiva" in text
+            and ("jahresabschluss" in text or "financial statements" in text)
+        )
+    ):
+        return ["financial_statements"]
+    return []
+
+
 def discover_dossier(root: Path) -> IngestionCoverage:
     root = root.resolve()
     inspected: dict[Path, tuple[str, list[str], dict[str, dict[str, str]]]] = {}
+    pdf_extractions: dict[Path, PdfExtraction] = {}
     for index_path in root.rglob("index.xml"):
         try:
             for path, headers in _gdpdu_tables(index_path):
@@ -225,10 +311,17 @@ def discover_dossier(root: Path) -> IngestionCoverage:
             headers, maps = _xlsx_profile(path)
             inspected[resolved] = ("xlsx", headers, maps)
         elif suffix == ".docx":
-            maps = {"payment_policy": {}} if _policy_match(path) else {}
+            maps = {}
+            if _policy_match(path):
+                maps["payment_policy"] = {}
+            if _jet_policy_match(path):
+                maps["jet_policy"] = {}
             inspected[resolved] = ("docx", [], maps)
         elif suffix == ".pdf":
-            inspected[resolved] = ("pdf", [], {})
+            extraction = read_pdf_passages(path, root)
+            pdf_extractions[resolved] = extraction
+            maps = {role: {} for role in pdf_role_matches(extraction.passages)}
+            inspected[resolved] = ("pdf", [], maps)
         else:
             inspected[resolved] = (suffix.lstrip(".") or "file", [], {})
 
@@ -237,7 +330,8 @@ def discover_dossier(root: Path) -> IngestionCoverage:
     }
     for path, (_, _, maps) in inspected.items():
         for role, mapping in maps.items():
-            role_candidates.setdefault(role, []).append((path, mapping))
+            if role in role_candidates:
+                role_candidates[role].append((path, mapping))
 
     roles: list[IngestionRole] = []
     for role in REQUIRED_ROLES:
@@ -284,18 +378,26 @@ def discover_dossier(root: Path) -> IngestionCoverage:
         inspected.items(), key=lambda item: item[0].as_posix()
     ):
         matches = sorted(maps)
-        if path in ambiguous_paths or len(matches) > 1:
+        if path in ambiguous_paths:
             status = "ambiguous"
             reason = "Document cannot be assigned to one unique role"
-        elif len(matches) == 1:
+        elif matches:
             status = "recognized"
-            reason = "Schema/content matched " + matches[0]
-        elif format_name == "pdf":
+            reason = (
+                "Native PDF text matched " if format_name == "pdf" else "Schema/content matched "
+            ) + ", ".join(matches)
+        elif format_name == "pdf" and pdf_extractions[path].status == "unreadable":
             status = "unsupported"
-            reason = "Retained for source access; general PDF fact extraction is not implemented"
+            reason = "No extractable native PDF text; OCR is disabled"
+            if pdf_extractions[path].error:
+                reason += ". " + pdf_extractions[path].error
+        elif format_name == "pdf":
+            status = "unclassified"
+            reason = "Native PDF text extracted; no implemented role consumes its content"
         else:
             status = "unclassified"
             reason = "No implemented rule currently consumes this document schema"
+        extraction = pdf_extractions.get(path)
         documents.append(
             IngestionDocument(
                 document=path.relative_to(root).as_posix(),
@@ -303,6 +405,19 @@ def discover_dossier(root: Path) -> IngestionCoverage:
                 status=status,
                 role_matches=matches,
                 reason=reason,
+                extraction_status=extraction.status if extraction else "not_applicable",
+                page_count=extraction.page_count if extraction else None,
+                extracted_pages=extraction.extracted_pages if extraction else 0,
+                passage_count=len(extraction.passages) if extraction else 0,
             )
         )
-    return IngestionCoverage(documents=documents, roles=roles)
+    source_passages = [
+        passage
+        for path in sorted(pdf_extractions, key=lambda item: item.as_posix())
+        for passage in pdf_extractions[path].passages
+    ]
+    return IngestionCoverage(
+        documents=documents,
+        roles=roles,
+        source_passages=source_passages,
+    )

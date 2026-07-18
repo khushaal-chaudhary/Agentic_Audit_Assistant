@@ -59,10 +59,13 @@ class ScenarioFactory:
         asset_postings: list[SourceRow] | None = None,
         future_invoices: list[SourceRow] | None = None,
         planning: list[EvidenceRef] | None = None,
+        journal_approvals: list[SourceRow] | None = None,
+        jet_planning: list[EvidenceRef] | None = None,
     ) -> AuditEngine:
         engine = AuditEngine.__new__(AuditEngine)
         engine.root = self.root
         engine.gl_path = self.source_path("Sachkonten/Sachkontobuchungen.txt")
+        engine.manual_gl_path = engine.gl_path
         engine.vendor_path = self.source_path("Kreditoren/Lieferantenbuchungen.txt")
         engine.asset_path = self.source_path("AV/Anlagen.txt")
         engine.asset_posting_path = self.source_path("AV/Anlagenbuchungen.txt")
@@ -73,6 +76,16 @@ class ScenarioFactory:
             "Begleitdokumente/Fakturajournal_Kreditoren.csv"
         )
         engine.planning_path = self.source_path("Begleitdokumente/Pruefungsplanung.docx")
+        engine.jet_planning_path = self.source_path(
+            "Begleitdokumente/JET_Planung.docx"
+        )
+        engine.approval_path = self.root / "__missing_role_journal_approvals"
+        engine.export_manifest_path = self.root / "__missing_role_export_manifest"
+        engine.it_confirmation_path = (
+            self.root / "__missing_role_it_completeness_confirmation"
+        )
+        engine._path_issues = {}
+        engine.discovery = None
         engine.gl = gl or []
         engine.vendor_postings = vendor_postings or []
         engine.receipts = receipts or []
@@ -82,5 +95,9 @@ class ScenarioFactory:
         engine.asset_postings = asset_postings or []
         engine.future_invoices = future_invoices or []
         engine.planning = planning or []
+        engine.journal_approvals = journal_approvals or []
+        engine.jet_planning = jet_planning if jet_planning is not None else engine.planning
+        engine.gl_by_capture = {}
+        engine.gl_row_count = len(engine.gl)
         engine._build_indexes()
         return engine

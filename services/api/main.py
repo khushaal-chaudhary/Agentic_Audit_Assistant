@@ -22,10 +22,21 @@ from services.api.jobs import JobStatus, JobStore, ReviewDisposition
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(REPO_ROOT / ".env")
+DEFAULT_FINAL = REPO_ROOT / "Cortea_Track_Final_Dataset" / "Daten BSP"
 DEFAULT_SAMPLE = (
-    REPO_ROOT / "Uebungsdaten_Muster_Verpackungen" / "Uebungsdaten Muster Verpackungen"
+    REPO_ROOT
+    / "Uebungsdaten_Muster_Verpackungen"
+    / "Uebungsdaten Muster Verpackungen"
 )
 JOBS = JobStore(REPO_ROOT / "data" / "runtime" / "dossiers")
+
+
+def _final_root() -> Path:
+    return Path(os.getenv("AUDIT_FINAL_ROOT") or os.getenv("AUDIT_DEMO_ROOT") or DEFAULT_FINAL)
+
+
+def _sample_root() -> Path:
+    return Path(os.getenv("AUDIT_SAMPLE_ROOT", str(DEFAULT_SAMPLE)))
 LOCAL_DEMO_ORIGINS = ("http://localhost:3000", "http://127.0.0.1:3000")
 
 
@@ -52,6 +63,10 @@ class DocumentSummary(BaseModel):
     role: str | None = None
     ingestion_status: str | None = None
     ingestion_reason: str | None = None
+    extraction_status: str | None = None
+    page_count: int | None = None
+    extracted_pages: int = 0
+    passage_count: int = 0
 
 
 class ReviewRequest(BaseModel):
@@ -72,7 +87,7 @@ class ReviewRequest(BaseModel):
 
 app = FastAPI(
     title="Agentic Audit Assistant API",
-    version="0.4.0",
+    version="0.5.0",
     description="Deterministic, provenance-aware audit analysis.",
 )
 app.add_middleware(
@@ -141,7 +156,7 @@ def _process_job(job_id: str, source: Path | None = None) -> None:
 
 @app.get("/health")
 def health() -> dict[str, str]:
-    return {"status": "ok", "engine": "0.4.0", "mode": "local-first"}
+    return {"status": "ok", "engine": "0.5.0", "mode": "local-first"}
 
 
 @app.post(
@@ -185,18 +200,40 @@ async def create_dossier(
     return JOBS.status(job.id)
 
 
+def _start_dossier(background_tasks: BackgroundTasks, dossier: Path, label: str) -> JobStatus:
+    if not dossier.exists():
+        raise HTTPException(status_code=404, detail=f"{label} dossier is not available")
+    job = JOBS.create(dossier.name)
+    background_tasks.add_task(_process_job, job.id, dossier)
+    return job
+
+
+@app.post(
+    "/api/dossiers/final",
+    response_model=JobStatus,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def create_final_dossier(background_tasks: BackgroundTasks) -> JobStatus:
+    return _start_dossier(background_tasks, _final_root(), "Final")
+
+
 @app.post(
     "/api/dossiers/sample",
     response_model=JobStatus,
     status_code=status.HTTP_202_ACCEPTED,
 )
 def create_sample_dossier(background_tasks: BackgroundTasks) -> JobStatus:
-    sample = Path(os.getenv("AUDIT_SAMPLE_ROOT", str(DEFAULT_SAMPLE)))
-    if not sample.exists():
-        raise HTTPException(status_code=404, detail="Sample dossier is not available")
-    job = JOBS.create(sample.name)
-    background_tasks.add_task(_process_job, job.id, sample)
-    return job
+    return _start_dossier(background_tasks, _sample_root(), "Sample")
+
+
+@app.post(
+    "/api/dossiers/demo",
+    response_model=JobStatus,
+    status_code=status.HTTP_202_ACCEPTED,
+    include_in_schema=False,
+)
+def create_demo_dossier(background_tasks: BackgroundTasks) -> JobStatus:
+    return create_final_dossier(background_tasks)
 
 
 @app.get("/api/dossiers/{job_id}/status", response_model=JobStatus)
@@ -272,16 +309,23 @@ def dossier_documents(job_id: str) -> list[DocumentSummary]:
         coverage = coverage_by_path.get(relative)
         summaries.append(
             DocumentSummary(
-            path=relative,
-            name=path.name,
-            extension=path.suffix.casefold().lstrip(".") or "file",
-            size_bytes=path.stat().st_size,
-            sha256=file_sha256(str(path)),
-            evidence_locations=evidence_counts.get(relative, 0),
-            role=role_by_path.get(relative),
-            ingestion_status=coverage.status if coverage else None,
-            ingestion_reason=coverage.reason if coverage else None,
-        )
+                path=relative,
+                name=path.name,
+                extension=path.suffix.casefold().lstrip(".") or "file",
+                size_bytes=path.stat().st_size,
+                sha256=file_sha256(str(path)),
+                evidence_locations=evidence_counts.get(relative, 0),
+                role=(
+                    role_by_path.get(relative)
+                    or (", ".join(coverage.role_matches) if coverage and coverage.role_matches else None)
+                ),
+                ingestion_status=coverage.status if coverage else None,
+                ingestion_reason=coverage.reason if coverage else None,
+                extraction_status=coverage.extraction_status if coverage else None,
+                page_count=coverage.page_count if coverage else None,
+                extracted_pages=coverage.extracted_pages if coverage else 0,
+                passage_count=coverage.passage_count if coverage else 0,
+            )
         )
     return summaries
 
@@ -342,11 +386,11 @@ def rules_catalog() -> list[RuleDefinition]:
 # Compatibility endpoints retained for scripts created against the first local baseline.
 @app.post("/api/demo/analyze", response_model=DossierReport)
 def analyze_demo() -> DossierReport:
-    sample = Path(os.getenv("AUDIT_SAMPLE_ROOT", str(DEFAULT_SAMPLE)))
-    if not sample.exists():
-        raise HTTPException(status_code=404, detail="Sample dossier is not available")
+    dossier = _final_root()
+    if not dossier.exists():
+        raise HTTPException(status_code=404, detail="Final dossier is not available")
     try:
-        return analyze_dossier(sample)
+        return analyze_dossier(dossier)
     except Exception as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -355,6 +399,6 @@ def analyze_demo() -> DossierReport:
 def sync_demo_to_cognee() -> dict:
     report = analyze_demo()
     try:
-        return CogneeClient().sync_report(report, Path(os.getenv("AUDIT_SAMPLE_ROOT", str(DEFAULT_SAMPLE))))
+        return CogneeClient().sync_report(report, _final_root())
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Cognee sync failed: {exc}") from exc

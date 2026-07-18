@@ -101,6 +101,12 @@ class IngestionDocument(BaseModel):
     status: Literal["recognized", "ambiguous", "unclassified", "unsupported"]
     role_matches: list[str] = Field(default_factory=list)
     reason: str
+    extraction_status: Literal["native", "partial", "unreadable", "not_applicable"] = (
+        "not_applicable"
+    )
+    page_count: int | None = None
+    extracted_pages: int = 0
+    passage_count: int = 0
 
 
 class IngestionRole(BaseModel):
@@ -114,6 +120,7 @@ class IngestionRole(BaseModel):
 class IngestionCoverage(BaseModel):
     documents: list[IngestionDocument] = Field(default_factory=list)
     roles: list[IngestionRole] = Field(default_factory=list)
+    source_passages: list[EvidenceRef] = Field(default_factory=list)
 
 
 class DossierReport(BaseModel):
@@ -125,7 +132,7 @@ class DossierReport(BaseModel):
     procedures: list[ProcedureResult] = Field(default_factory=list)
     suppressed_leads: int = 0
     ingestion: IngestionCoverage | None = None
-    engine_version: str = "0.4.0"
+    engine_version: str = "0.5.0"
 
 
 def ensure_grounded(report: DossierReport) -> None:

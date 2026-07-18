@@ -269,7 +269,8 @@ ledger arithmetic remains local.
 
 - Only rules marked **implemented** in the rulebook are executed.
 - Planned rule cards are coverage goals, not completed tests.
-- Scanned image documents would require an OCR layer.
+- PDFs containing real text are split into page-linked passages. Scanned image documents are
+  visibly marked unreadable because OCR is intentionally not part of the demo.
 - Business explanations outside the supplied dossier still require auditor follow-up.
 - Local review records are designed for a single-user demo; production needs authentication and
   role-based sign-off.

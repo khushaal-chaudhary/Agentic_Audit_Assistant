@@ -103,6 +103,10 @@ export type DocumentSummary = {
   role?: string;
   ingestion_status?: "recognized" | "ambiguous" | "unclassified" | "unsupported";
   ingestion_reason?: string;
+  extraction_status?: "native" | "partial" | "unreadable" | "not_applicable";
+  page_count?: number;
+  extracted_pages: number;
+  passage_count: number;
 };
 
 export type RuleDefinition = {

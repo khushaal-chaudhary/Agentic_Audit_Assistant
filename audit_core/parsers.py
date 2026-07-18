@@ -10,10 +10,11 @@ from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from functools import lru_cache
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Iterator
 
 from docx import Document
 from openpyxl import load_workbook
+from pypdf import PdfReader
 
 from .models import EvidenceRef
 
@@ -29,12 +30,28 @@ def relative_name(path: Path, root: Path) -> str:
 
 def decode_text(path: Path) -> str:
     raw = path.read_bytes()
-    for encoding in ("utf-8-sig", "cp1252", "utf-8"):
+    for encoding in _text_encodings():
         try:
             return raw.decode(encoding)
         except UnicodeDecodeError:
             continue
     return raw.decode("utf-8", errors="replace")
+
+
+def _text_encodings() -> tuple[str, ...]:
+    return ("utf-8-sig", "cp1252", "utf-8")
+
+
+def detect_text_encoding(path: Path) -> str:
+    with path.open("rb") as stream:
+        sample = stream.read(64 * 1024)
+    for encoding in _text_encodings():
+        try:
+            sample.decode(encoding)
+            return encoding
+        except UnicodeDecodeError:
+            continue
+    return "utf-8"
 
 
 def normalize_text(value: object) -> str:
@@ -99,6 +116,97 @@ class SourceRow:
         return ",".join(selected) if selected else None
 
 
+@dataclass(frozen=True)
+class PdfExtraction:
+    page_count: int
+    extracted_pages: int
+    passages: list[EvidenceRef]
+    error: str | None = None
+
+    @property
+    def status(self) -> str:
+        if self.extracted_pages == 0:
+            return "unreadable"
+        if self.extracted_pages < self.page_count:
+            return "partial"
+        return "native"
+
+
+def _pdf_page_passages(
+    path: Path,
+    root: Path,
+    page_number: int,
+    text: str,
+    *,
+    max_chars: int = 1200,
+) -> list[EvidenceRef]:
+    lines = [(index, line.rstrip()) for index, line in enumerate(text.splitlines(), start=1)]
+    non_empty = [(index, line) for index, line in lines if line.strip()]
+    passages: list[EvidenceRef] = []
+    block: list[tuple[int, str]] = []
+    size = 0
+
+    def append_block() -> None:
+        if not block:
+            return
+        start, end = block[0][0], block[-1][0]
+        passages.append(
+            EvidenceRef(
+                document=relative_name(path, root),
+                locator_type="page",
+                page=page_number,
+                passage=f"lines:{start}-{end}",
+                excerpt="\n".join(line for _, line in block),
+                sha256=file_sha256(str(path)),
+            )
+        )
+
+    for line_number, line in non_empty:
+        added = len(line) + (1 if block else 0)
+        if block and size + added > max_chars:
+            append_block()
+            block = []
+            size = 0
+        block.append((line_number, line))
+        size += added
+    append_block()
+    return passages
+
+
+def read_pdf_passages(path: Path, root: Path) -> PdfExtraction:
+    """Extract native PDF text into exact page-and-line passages.
+
+    OCR is deliberately out of scope. Image-only or otherwise unreadable pages remain visible in
+    coverage as unreadable instead of being silently treated as extracted.
+    """
+    try:
+        reader = PdfReader(path, strict=False)
+        if reader.is_encrypted and not reader.decrypt(""):
+            return PdfExtraction(0, 0, [], "Encrypted PDF cannot be opened without a password")
+    except Exception as exc:
+        return PdfExtraction(0, 0, [], f"PDF could not be opened: {exc}")
+
+    passages: list[EvidenceRef] = []
+    extracted_pages = 0
+    page_errors: list[int] = []
+    for page_number, page in enumerate(reader.pages, start=1):
+        try:
+            text = page.extract_text() or ""
+        except Exception:
+            page_errors.append(page_number)
+            continue
+        if not text.strip():
+            continue
+        extracted_pages += 1
+        passages.extend(_pdf_page_passages(path, root, page_number, text))
+    error = (
+        "Native text extraction failed on page(s): " + ", ".join(map(str, page_errors))
+        if page_errors
+        else None
+    )
+    return PdfExtraction(len(reader.pages), extracted_pages, passages, error)
+
+
 def gdpdu_headers(folder: Path, filename: str) -> list[str]:
     tree = ET.parse(folder / "index.xml")
     for table in tree.iter():
@@ -119,21 +227,38 @@ def gdpdu_headers(folder: Path, filename: str) -> list[str]:
     raise ValueError(f"No GDPdU schema for {filename}")
 
 
+def iter_semicolon(
+    path: Path,
+    root: Path,
+    headers: list[str] | None = None,
+) -> Iterator[SourceRow]:
+    """Stream a semicolon table while preserving one-based physical row locators."""
+    encoding = detect_text_encoding(path)
+    with path.open("r", encoding=encoding, errors="replace", newline="") as stream:
+        reader = csv.reader(stream, delimiter=";", quotechar='"')
+        if headers is None:
+            try:
+                fieldnames = [value.strip() for value in next(reader)]
+            except StopIteration:
+                return
+            first_row_number = 2
+        else:
+            fieldnames = headers
+            first_row_number = 1
+        for row_number, values in enumerate(reader, start=first_row_number):
+            padded = values + [""] * max(0, len(fieldnames) - len(values))
+            data = dict(zip(fieldnames, padded, strict=False))
+            yield SourceRow(
+                path,
+                root,
+                row_number,
+                data,
+                ";".join(values),
+            )
+
+
 def read_semicolon(path: Path, root: Path, headers: list[str] | None = None) -> list[SourceRow]:
-    text = decode_text(path)
-    lines = text.splitlines()
-    parsed = list(csv.reader(lines, delimiter=";", quotechar='"'))
-    if not parsed:
-        return []
-    fieldnames = headers or [value.strip() for value in parsed[0]]
-    start = 0 if headers else 1
-    rows: list[SourceRow] = []
-    for index, values in enumerate(parsed[start:], start=start + 1):
-        padded = values + [""] * max(0, len(fieldnames) - len(values))
-        rows.append(
-            SourceRow(path, root, index, dict(zip(fieldnames, padded, strict=False)), lines[index - 1])
-        )
-    return rows
+    return list(iter_semicolon(path, root, headers))
 
 
 def read_xlsx_table(path: Path, root: Path, required_header: str) -> list[SourceRow]:
@@ -238,5 +363,19 @@ def extract_payment_threshold(passages: list[EvidenceRef]) -> tuple[Decimal, Evi
         match = re.search(r"(?:ab|uber)\s+([0-9][0-9.\s]*)\s*eur", normalized)
         if match:
             control_number = match.group(1).replace(" ", "").replace(".", "")
+            return parse_decimal(control_number), ref
+    return None
+
+
+def extract_jet_threshold(passages: list[EvidenceRef]) -> tuple[Decimal, EvidenceRef] | None:
+    for ref in passages:
+        normalized = normalize_text(ref.excerpt)
+        match = re.search(
+            r"(?:nichtaufgriffsgrenze|clearly trivial threshold)(?:\s+jet)?\s*:?\s*"
+            r"([0-9][0-9.,\s]*)\s*eur",
+            normalized,
+        )
+        if match:
+            control_number = re.sub(r"[^0-9]", "", match.group(1))
             return parse_decimal(control_number), ref
     return None

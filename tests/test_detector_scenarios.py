@@ -431,4 +431,6 @@ def test_rule_catalog_has_unique_ids_and_explicit_status() -> None:
         "CAPITALISED_REPAIRS",
         "UNRECORDED_CUTOFF_LIABILITIES",
         "SPLIT_PAYMENTS_BELOW_THRESHOLD",
+        "EXPORT_COMPLETENESS_RECONCILIATION",
+        "MANUAL_JOURNAL_APPROVAL_VIOLATION",
     }

@@ -20,9 +20,11 @@ from .models import (
 from .parsers import (
     SourceRow,
     canonicalize_rows,
+    extract_jet_threshold,
     extract_payment_threshold,
     file_sha256,
     gdpdu_headers,
+    iter_semicolon,
     locate_dossier_root,
     normalize_text,
     parse_date,
@@ -60,6 +62,46 @@ def _unique_rows(rows: list[SourceRow]) -> list[SourceRow]:
     return unique
 
 
+def _declared_gl_row_count(
+    passages: list[EvidenceRef],
+) -> tuple[int, EvidenceRef] | None:
+    text = "\n".join(passage.excerpt for passage in passages)
+    match = re.search(
+        r"sachkontobuchungen(?:\.txt)?[\s\S]{0,180}?"
+        r"([0-9]{1,3}(?:[.,\s][0-9]{3}){1,3}|[0-9]{5,})",
+        normalize_text(text),
+    )
+    if not match:
+        return None
+    token = match.group(1)
+    count = int(re.sub(r"[^0-9]", "", token))
+    compact_token = re.sub(r"\s", "", token)
+    reference = next(
+        (
+            passage
+            for passage in passages
+            if compact_token in re.sub(r"\s", "", normalize_text(passage.excerpt))
+        ),
+        passages[0] if passages else None,
+    )
+    return (count, reference) if reference else None
+
+
+def _approval_violation_reason(row: SourceRow) -> str | None:
+    creator = row.data.get("ERSTELLER", "").strip()
+    approver = row.data.get("FREIGEBER", "").strip()
+    status = normalize_text(row.data.get("FREIGABESTATUS"))
+    if not row.data.get("ERFASSUNGSNUMMER", "").strip():
+        return None
+    if creator and creator == approver:
+        return "creator and approver are the same user"
+    if not approver:
+        return "journal was posted without an approver"
+    if not any(marker in status for marker in ("freigegeben", "approved", "genehmigt")):
+        return "approval status is not approved"
+    return None
+
+
 class AuditEngine:
     def __init__(self, root: Path):
         self.root = locate_dossier_root(root)
@@ -79,6 +121,7 @@ class AuditEngine:
             return path
 
         self.gl_path = resolve("general_ledger")
+        self.manual_gl_path = resolve("manual_journal_ledger")
         self.vendor_path = resolve("vendor_postings")
         self.asset_path = resolve("asset_master")
         self.asset_posting_path = resolve("asset_postings")
@@ -86,9 +129,12 @@ class AuditEngine:
         self.change_path = resolve("vendor_changes")
         self.permission_path = resolve("permissions")
         self.future_invoice_path = resolve("future_vendor_invoices")
+        self.approval_path = resolve("journal_approvals")
         self.planning_path = resolve("payment_policy")
+        self.jet_planning_path = resolve("jet_policy")
+        self.export_manifest_path = resolve("export_manifest")
+        self.it_confirmation_path = resolve("it_completeness_confirmation")
 
-        self.gl = self._read_table(self.gl_path)
         self.vendor_postings = self._read_table(self.vendor_path)
         self.assets = self._read_table(self.asset_path)
         self.asset_postings = self._read_table(self.asset_posting_path)
@@ -107,12 +153,74 @@ class AuditEngine:
             else []
         )
         self.future_invoices = self._read_table(self.future_invoice_path)
+        self.journal_approvals = self._read_table(self.approval_path)
         self.planning = (
             read_docx_passages(self.planning_path, self.root)
             if self.planning_path.exists()
             else []
         )
+        self.jet_planning = (
+            read_docx_passages(self.jet_planning_path, self.root)
+            if self.jet_planning_path.exists()
+            else []
+        )
+        self.gl: list[SourceRow] = []
+        self._stream_general_ledger()
         self._build_indexes()
+
+    def _stream_general_ledger(self) -> None:
+        self._gl_streamed = True
+        self.gl_by_document: dict[str, list[SourceRow]] = defaultdict(list)
+        self.gl_by_capture: dict[str, list[SourceRow]] = defaultdict(list)
+        self.gl_document_numbers: set[str] = set()
+        self.accrual_rows: list[SourceRow] = []
+        self.gl_row_count = 0
+        if not self.gl_path.exists():
+            return
+
+        needed_documents = {
+            row.data.get("BUCHUNGSNUMMER", "")
+            for row in self.vendor_postings
+            if row.data.get("BUCHUNGSNUMMER")
+        }
+        approval_candidates = {
+            row.data.get("ERFASSUNGSNUMMER", ""): row
+            for row in self.journal_approvals
+            if _approval_violation_reason(row)
+        }
+        headers = (
+            gdpdu_headers(self.gl_path.parent, self.gl_path.name)
+            if (self.gl_path.parent / "index.xml").exists()
+            else None
+        )
+        header_map = self._header_maps.get(self.gl_path, {})
+        for source_row in iter_semicolon(self.gl_path, self.root, headers):
+            self.gl_row_count += 1
+            row = canonicalize_rows([source_row], header_map)[0] if header_map else source_row
+            document_number = row.data.get("BUCHUNGSNUMMER", "")
+            if document_number:
+                self.gl_document_numbers.add(document_number)
+            if document_number in needed_documents:
+                self.gl_by_document[document_number].append(row)
+            capture_number = (
+                row.data.get("ERFASSUNGSNUMMER", "")
+                or row.data.get("GEGENKONTO", "")
+            )
+            approval = approval_candidates.get(capture_number)
+            if approval and all(
+                (
+                    row.data.get("BENUTZERKENNUNG", "")
+                    == approval.data.get("ERSTELLER", ""),
+                    row.data.get("ERFASSUNGSDATUM", "")
+                    == approval.data.get("ERFASST_AM", ""),
+                )
+            ):
+                self.gl_by_capture[capture_number].append(row)
+            text = normalize_text(row.data.get("BUCHUNGSTEXT"))
+            if "ruckstellung" in text or "unfaktur" in text:
+                self.accrual_rows.append(row)
+        self.gl_by_document = dict(self.gl_by_document)
+        self.gl_by_capture = dict(self.gl_by_capture)
 
     def _build_indexes(self) -> None:
         gl_by_document: dict[str, list[SourceRow]] = defaultdict(list)
@@ -123,8 +231,9 @@ class AuditEngine:
         ] = defaultdict(list)
         payment_groups: dict[tuple[str, str], list[SourceRow]] = defaultdict(list)
 
-        for row in _unique_rows(self.gl):
-            gl_by_document[row.data.get("BUCHUNGSNUMMER", "")].append(row)
+        if not getattr(self, "_gl_streamed", False):
+            for row in _unique_rows(self.gl):
+                gl_by_document[row.data.get("BUCHUNGSNUMMER", "")].append(row)
         for row in _unique_rows(self.vendor_postings):
             vendor = row.data.get("LIEFERANTENKONTONUMMER", "")
             postings_by_vendor[vendor].append(row)
@@ -142,8 +251,9 @@ class AuditEngine:
                 )
                 open_receipts_by_key[key].append(row)
 
-        self.gl_by_document = dict(gl_by_document)
-        self.gl_document_numbers = set(gl_by_document)
+        if not getattr(self, "_gl_streamed", False):
+            self.gl_by_document = dict(gl_by_document)
+            self.gl_document_numbers = set(gl_by_document)
         self.postings_by_vendor = dict(postings_by_vendor)
         self.receipts_by_vendor = dict(receipts_by_vendor)
         self.open_receipts_by_key = dict(open_receipts_by_key)
@@ -154,12 +264,14 @@ class AuditEngine:
         self.assets_by_id = {
             row.data.get("ANLAGENNUMMER", ""): row for row in self.assets
         }
-        self.accrual_rows = [
-            row
-            for row in _unique_rows(self.gl)
-            if "ruckstellung" in normalize_text(row.data.get("BUCHUNGSTEXT"))
-            or "unfaktur" in normalize_text(row.data.get("BUCHUNGSTEXT"))
-        ]
+        if not getattr(self, "_gl_streamed", False):
+            self.accrual_rows = [
+                row
+                for row in _unique_rows(self.gl)
+                if "ruckstellung" in normalize_text(row.data.get("BUCHUNGSTEXT"))
+                or "unfaktur" in normalize_text(row.data.get("BUCHUNGSTEXT"))
+            ]
+            self.gl_row_count = len(self.gl)
 
     def _read_table(self, path: Path) -> list[SourceRow]:
         if not path.exists():
@@ -188,6 +300,30 @@ class AuditEngine:
             )
         return ProcedureResult(rule_id=rule_id, status="completed")
 
+    def _role_passages(self, role_name: str) -> list[EvidenceRef]:
+        resolution = next(
+            (role for role in self.discovery.roles if role.role == role_name),
+            None,
+        )
+        if not resolution or not resolution.document:
+            return []
+        return [
+            passage
+            for passage in self.discovery.source_passages
+            if passage.document == resolution.document
+        ]
+
+    def _completeness_counts(
+        self,
+    ) -> tuple[tuple[int, EvidenceRef], tuple[int, EvidenceRef]] | None:
+        export_count = _declared_gl_row_count(self._role_passages("export_manifest"))
+        confirmation_count = _declared_gl_row_count(
+            self._role_passages("it_completeness_confirmation")
+        )
+        if not export_count or not confirmation_count:
+            return None
+        return export_count, confirmation_count
+
     def run(self) -> DossierReport:
         findings: list[Finding] = []
         suppressed = 0
@@ -212,6 +348,14 @@ class AuditEngine:
             self._procedure(
                 "SPLIT_PAYMENTS_BELOW_THRESHOLD", [self.vendor_path, self.planning_path]
             ),
+            self._procedure(
+                "EXPORT_COMPLETENESS_RECONCILIATION",
+                [self.gl_path, self.export_manifest_path, self.it_confirmation_path],
+            ),
+            self._procedure(
+                "MANUAL_JOURNAL_APPROVAL_VIOLATION",
+                [self.manual_gl_path, self.approval_path, self.jet_planning_path],
+            ),
         ]
         if (
             procedures[3].status == "completed"
@@ -221,6 +365,21 @@ class AuditEngine:
                 rule_id="SPLIT_PAYMENTS_BELOW_THRESHOLD",
                 status="not_testable",
                 reason="No payment approval threshold could be extracted from the control document",
+            )
+        if procedures[4].status == "completed" and self._completeness_counts() is None:
+            procedures[4] = ProcedureResult(
+                rule_id="EXPORT_COMPLETENESS_RECONCILIATION",
+                status="not_testable",
+                reason="Could not extract a general-ledger row count from both control documents",
+            )
+        if (
+            procedures[5].status == "completed"
+            and extract_jet_threshold(self.jet_planning) is None
+        ):
+            procedures[5] = ProcedureResult(
+                rule_id="MANUAL_JOURNAL_APPROVAL_VIOLATION",
+                status="not_testable",
+                reason="No JET clearly-trivial threshold could be extracted from the planning document",
             )
 
         if procedures[0].status == "completed":
@@ -233,6 +392,12 @@ class AuditEngine:
             findings.extend(self.detect_cutoff_failures())
         if procedures[3].status == "completed":
             detected, detector_suppressed = self.detect_split_payments()
+            findings.extend(detected)
+            suppressed += detector_suppressed
+        if procedures[4].status == "completed":
+            findings.extend(self.detect_export_completeness_mismatch())
+        if procedures[5].status == "completed":
+            detected, detector_suppressed = self.detect_manual_journal_approval_violations()
             findings.extend(detected)
             suppressed += detector_suppressed
 
@@ -250,6 +415,182 @@ class AuditEngine:
         )
         ensure_grounded(report)
         return report
+
+    def detect_export_completeness_mismatch(self) -> list[Finding]:
+        counts = self._completeness_counts()
+        if counts is None:
+            return []
+        (export_count, export_ref), (confirmation_count, confirmation_ref) = counts
+        physical_count = self.gl_row_count
+        if len({export_count, confirmation_count, physical_count}) == 1:
+            return []
+        physical_ref = _query_evidence(
+            self.gl_path,
+            self.root,
+            "count physical GDPdU data rows using the declared index.xml schema",
+            f"Physical general-ledger table contains {physical_count} data rows.",
+        )
+        return [
+            Finding(
+                id=_finding_id(
+                    "EXPORT_COMPLETENESS_RECONCILIATION",
+                    str(export_count),
+                    str(confirmation_count),
+                    str(physical_count),
+                ),
+                rule_id="EXPORT_COMPLETENESS_RECONCILIATION",
+                category="control",
+                severity="high",
+                confidence=Decimal("0.99"),
+                title="Independent ledger-completeness records disagree",
+                summary=(
+                    f"The export manifest declares {export_count} general-ledger rows, the IT "
+                    f"confirmation declares {confirmation_count}, and the physical GDPdU table "
+                    f"contains {physical_count}. The population cannot be treated as reconciled."
+                ),
+                affected_entities=["General ledger", "GDPdU export"],
+                evidence=[export_ref, confirmation_ref, physical_ref],
+                counterevidence_considered=[
+                    "German thousands separators are normalized before comparison.",
+                    "The physical count excludes schema metadata and counts only data rows.",
+                    "No finding is published when both declarations and the file agree.",
+                ],
+                next_step=(
+                    "Regenerate and sign the completeness confirmations, reconcile the omitted or "
+                    "additional rows, and verify the file hash before relying on the population."
+                ),
+            )
+        ]
+
+    def detect_manual_journal_approval_violations(self) -> tuple[list[Finding], int]:
+        threshold_result = extract_jet_threshold(
+            getattr(self, "jet_planning", self.planning)
+        )
+        if not threshold_result:
+            return [], 0
+        threshold, threshold_ref = threshold_result
+        findings: list[Finding] = []
+        suppressed = 0
+        for approval in _unique_rows(self.journal_approvals):
+            reason = _approval_violation_reason(approval)
+            if not reason:
+                continue
+            declared_absolute = parse_decimal(approval.data.get("SUMME_ABS_EUR"))
+            if declared_absolute < threshold:
+                suppressed += 1
+                continue
+            capture_number = approval.data.get("ERFASSUNGSNUMMER", "")
+            linked_rows = _unique_rows(self.gl_by_capture.get(capture_number, []))
+            manual_markers = {"erstellte journale", "created journals", "manual journal"}
+            has_manual_origin = any(
+                normalize_text(row.data.get(field)) in manual_markers
+                for row in linked_rows
+                for field in ("PERIODENZUGEHÖRIGKEIT", "BUCHUNGSTYP", "JOURNAL_ORIGIN")
+            )
+            try:
+                expected_lines = int(approval.data.get("ANZAHL_ZEILEN", ""))
+            except ValueError:
+                suppressed += 1
+                continue
+            linked_absolute = sum(
+                (abs(parse_decimal(row.data.get("BUCHUNGSBETRAG"))) for row in linked_rows),
+                Decimal("0"),
+            )
+            if (
+                not linked_rows
+                or not has_manual_origin
+                or len(linked_rows) != expected_lines
+                or abs(linked_absolute - declared_absolute) > Decimal("0.01")
+            ):
+                suppressed += 1
+                continue
+            positive_rows = [
+                row
+                for row in linked_rows
+                if parse_decimal(row.data.get("BUCHUNGSBETRAG")) > 0
+            ]
+            if not positive_rows:
+                suppressed += 1
+                continue
+            approval_ref = approval.evidence(
+                "ERFASSUNGSNUMMER",
+                "JOURNALNAME",
+                "ANZAHL_ZEILEN",
+                "SUMME_ABS_EUR",
+                "ERSTELLER",
+                "FREIGEBER",
+                "FREIGABESTATUS",
+            )
+            posting_refs = [
+                row.evidence(
+                    "SACHKONTONUMMER",
+                    "BUCHUNGSNUMMER",
+                    "BUCHUNGSDATUM",
+                    "BUCHUNGSBETRAG",
+                    "BUCHUNGSTEXT",
+                    "ERFASSUNGSNUMMER",
+                    "BENUTZERKENNUNG",
+                )
+                for row in positive_rows
+            ]
+            exposure = sum(
+                (parse_decimal(row.data.get("BUCHUNGSBETRAG")) for row in positive_rows),
+                Decimal("0"),
+            )
+            journal_name = approval.data.get("JOURNALNAME") or capture_number
+            findings.append(
+                Finding(
+                    id=_finding_id(
+                        "MANUAL_JOURNAL_APPROVAL_VIOLATION",
+                        capture_number,
+                    ),
+                    rule_id="MANUAL_JOURNAL_APPROVAL_VIOLATION",
+                    category="control",
+                    severity="high",
+                    confidence=Decimal("0.99"),
+                    title=f"Material manual journal {journal_name} bypassed independent approval",
+                    summary=(
+                        f"The approval log states that the {reason}. The linked manual journal "
+                        "reconciles to the log and exceeds the planning document's source-defined "
+                        "JET threshold."
+                    ),
+                    amount=exposure,
+                    currency="EUR",
+                    calculation=CalculationTrace(
+                        currency="EUR",
+                        terms=[
+                            CalculationTerm(
+                                label=(
+                                    row.data.get("BUCHUNGSNUMMER")
+                                    or f"ledger row {row.row_number}"
+                                ),
+                                value=parse_decimal(row.data.get("BUCHUNGSBETRAG")),
+                                evidence=reference,
+                            )
+                            for row, reference in zip(
+                                positive_rows, posting_refs, strict=True
+                            )
+                        ],
+                    ),
+                    affected_entities=[
+                        capture_number,
+                        journal_name,
+                        approval.data.get("ERSTELLER", ""),
+                    ],
+                    evidence=[approval_ref, threshold_ref, *posting_refs],
+                    counterevidence_considered=[
+                        "Approval exceptions below the source-defined JET threshold are suppressed.",
+                        "Only manual-origin ledger rows are linked.",
+                        "Declared line count and absolute journal volume must reconcile to the ledger.",
+                        "Independently approved journals remain clean.",
+                    ],
+                    next_step=(
+                        "Obtain the business support and independent retrospective approval; inspect "
+                        "the preparer's access and related period-end entries."
+                    ),
+                )
+            )
+        return findings, suppressed
 
     def detect_vendor_control_failures(self) -> tuple[list[Finding], int]:
         findings: list[Finding] = []

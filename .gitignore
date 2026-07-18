@@ -32,9 +32,12 @@ tmp/
 Thumbs.db
 .idea/
 .vscode/
+.claude/
 
 # Local evaluation material: never ship the answer key
 UEBUNG_GROUND-TRUTH_SEALED_Muster-Verpackungen.md
+Cortea_Track_Final_Dataset/
+Cortea_Track_Final_Dataset.zip
 
 # Duplicate archive; the extracted sample remains versioned
 Uebungsdaten_Muster_Verpackungen.zip
