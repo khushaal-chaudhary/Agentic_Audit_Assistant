@@ -29,8 +29,9 @@ Every rule must:
 
 ## Execution and performance model
 
-Source files are parsed once. The engine then builds shared in-memory indexes before any detector
-runs:
+Source files are first assigned to required roles from their schema or policy content. Missing or
+ambiguous roles make dependent procedures not_testable. Resolved files are parsed once, and the
+engine then builds shared in-memory indexes before any detector runs:
 
 - General-ledger rows by document number
 - Vendor postings by vendor

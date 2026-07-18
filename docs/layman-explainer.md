@@ -219,8 +219,10 @@ connects, and evaluates them.
 
 ### How are German and English documents handled?
 
-The parsers normalize common text and date variations while preserving the original excerpt for the
-auditor.
+The ingestion layer recognizes implemented document roles from declared columns or policy content,
+not primarily from filenames. Supported German and English header aliases map to stable internal
+fields while preserving the original source for the auditor. Missing or duplicate role matches are
+reported instead of guessed.
 
 Financial amounts are parsed with locale-aware decimal handling, including German and international
 formats. Original source text remains visible in the evidence panel.

@@ -15,7 +15,7 @@ from audit_core.models import DossierReport
 from audit_core.parsers import decode_text
 
 
-PROJECTION_VERSION = "projection-v4"
+PROJECTION_VERSION = "projection-v5"
 
 
 class CogneeClient:

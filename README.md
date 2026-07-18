@@ -7,6 +7,7 @@ source locators.
 ## Current baseline
 
 - GDPdU `index.xml`-driven parsing for headerless ledger exports.
+- Schema/content-driven document role discovery with explicit missing and ambiguous states.
 - Locale-safe `Decimal` handling for German monetary values.
 - CSV/TXT, XLSX, and DOCX fact adapters; PDFs are retained and source-served pending general
   extraction/OCR support.
@@ -51,6 +52,9 @@ an optional deployment target. See `docs/architecture.md`.
 
 The living specification for implemented rules, false-positive suppression, known limitations, and
 required tests is in [docs/deterministic-rules.md](docs/deterministic-rules.md).
+
+The supported document roles, canonical fields, aliases, and ambiguity behavior are specified in
+[docs/ingestion-discovery.md](docs/ingestion-discovery.md).
 
 For a non-technical product explanation, common questions, and a suggested demo narrative, see
 [docs/layman-explainer.md](docs/layman-explainer.md).

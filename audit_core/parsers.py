@@ -5,7 +5,7 @@ import hashlib
 import re
 import unicodedata
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from functools import lru_cache
@@ -170,6 +170,22 @@ def read_xlsx_table(path: Path, root: Path, required_header: str) -> list[Source
     return rows
 
 
+def canonicalize_rows(
+    rows: list[SourceRow],
+    header_map: dict[str, str],
+) -> list[SourceRow]:
+    canonical: list[SourceRow] = []
+    for row in rows:
+        data = dict(row.data)
+        cells = dict(row.cells) if row.cells else None
+        for canonical_name, actual_name in header_map.items():
+            data[canonical_name] = row.data.get(actual_name, "")
+            if cells is not None and actual_name in cells:
+                cells[canonical_name] = cells[actual_name]
+        canonical.append(replace(row, data=data, cells=cells))
+    return canonical
+
+
 def read_docx_passages(path: Path, root: Path) -> list[EvidenceRef]:
     document = Document(path)
     refs: list[EvidenceRef] = []
@@ -193,10 +209,25 @@ def locate_dossier_root(path: Path) -> Path:
     candidate = path.resolve()
     if (candidate / "Sachkonten" / "index.xml").exists():
         return candidate
-    matches = list(candidate.rglob("Sachkonten/index.xml"))
-    if len(matches) != 1:
-        raise ValueError(f"Expected one GDPdU dossier below {path}, found {len(matches)}")
-    return matches[0].parent.parent
+    roots: set[Path] = set()
+    signature = {"SACHKONTONUMMER", "BUCHUNGSNUMMER", "BUCHUNGSBETRAG"}
+    for index_path in candidate.rglob("index.xml"):
+        try:
+            tree = ET.parse(index_path)
+        except (ET.ParseError, OSError):
+            continue
+        headers = {
+            child.text or ""
+            for column in tree.iter()
+            if column.tag.split("}")[-1] == "VariableColumn"
+            for child in column
+            if child.tag.split("}")[-1] == "Name"
+        }
+        if signature <= headers:
+            roots.add(index_path.parent.parent)
+    if len(roots) != 1:
+        raise ValueError(f"Expected one GDPdU dossier below {path}, found {len(roots)}")
+    return roots.pop()
 
 
 def extract_payment_threshold(passages: list[EvidenceRef]) -> tuple[Decimal, EvidenceRef] | None:

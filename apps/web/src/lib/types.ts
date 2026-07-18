@@ -100,6 +100,9 @@ export type DocumentSummary = {
   size_bytes: number;
   sha256: string;
   evidence_locations: number;
+  role?: string;
+  ingestion_status?: "recognized" | "ambiguous" | "unclassified" | "unsupported";
+  ingestion_reason?: string;
 };
 
 export type RuleDefinition = {

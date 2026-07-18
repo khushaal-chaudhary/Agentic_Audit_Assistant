@@ -95,6 +95,27 @@ class ProcedureResult(BaseModel):
     reason: str | None = None
 
 
+class IngestionDocument(BaseModel):
+    document: str
+    format: str
+    status: Literal["recognized", "ambiguous", "unclassified", "unsupported"]
+    role_matches: list[str] = Field(default_factory=list)
+    reason: str
+
+
+class IngestionRole(BaseModel):
+    role: str
+    status: Literal["resolved", "ambiguous", "missing"]
+    document: str | None = None
+    header_map: dict[str, str] = Field(default_factory=dict)
+    reason: str
+
+
+class IngestionCoverage(BaseModel):
+    documents: list[IngestionDocument] = Field(default_factory=list)
+    roles: list[IngestionRole] = Field(default_factory=list)
+
+
 class DossierReport(BaseModel):
     dossier_name: str
     generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -103,7 +124,8 @@ class DossierReport(BaseModel):
     findings: list[Finding]
     procedures: list[ProcedureResult] = Field(default_factory=list)
     suppressed_leads: int = 0
-    engine_version: str = "0.3.0"
+    ingestion: IngestionCoverage | None = None
+    engine_version: str = "0.4.0"
 
 
 def ensure_grounded(report: DossierReport) -> None:

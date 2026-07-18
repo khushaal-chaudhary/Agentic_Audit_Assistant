@@ -253,13 +253,21 @@ function Documents({
   onNavigate,
 }: Pick<Props, "report" | "documents" | "apiUrl" | "jobId" | "onNavigate">) {
   if (!report || !jobId) return <EmptyDossier onNavigate={onNavigate} />;
+  const recognized = documents.filter(
+    (document) => document.ingestion_status === "recognized",
+  ).length;
+  const exceptions = documents.filter(
+    (document) =>
+      document.ingestion_status === "ambiguous"
+      || document.ingestion_status === "unsupported",
+  ).length;
   return (
     <section className="overflow-hidden rounded-2xl border border-[var(--line)] bg-white shadow-sm">
       <div className="flex items-center justify-between border-b border-[var(--line)] px-5 py-4">
         <div>
           <h2 className="text-sm font-semibold">Source document inventory</h2>
           <p className="mt-1 text-xs text-[var(--muted)]">
-            {documents.length} files retained locally with content hashes
+            {documents.length} files retained · {recognized} recognized · {exceptions} need attention
           </p>
         </div>
         <span className="result-chip passed">Evidence bound</span>
@@ -280,6 +288,11 @@ function Documents({
               <span className="block truncate font-medium">{document.name}</span>
               <span className="mt-1 block truncate font-mono text-[10px] text-[var(--muted)]">
                 {document.sha256.slice(0, 16)}…
+              </span>
+              <span className="mt-1 block truncate text-[10px] text-[var(--muted)]">
+                {document.role
+                  ? "Role: " + document.role.replaceAll("_", " ")
+                  : document.ingestion_reason ?? "Inventory only"}
               </span>
             </span>
             <span className="uppercase text-[var(--muted)]">{document.extension}</span>

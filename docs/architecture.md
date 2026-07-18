@@ -8,6 +8,7 @@
 4. Every monetary value is a Decimal with a term-level calculation trace that recomputes the
    displayed total from exact source locators.
 5. Missing support is represented as `not_testable`; it is not evidence of fraud by itself.
+6. Input roles resolve from schemas/content; ambiguous matches are never selected heuristically.
 
 Reports using the earlier amount-without-terms schema fail closed and must be rerun with the current
 engine before their figures can be displayed or projected.
@@ -18,6 +19,8 @@ engine before their figures can be displayed or projected.
 - FastAPI and document processing run locally on port 8000.
 - Uploaded dossiers, job status, evidence reports, and auditor dispositions live under ignored
   `data/runtime`.
+- Each report carries ingestion coverage for recognized, ambiguous, unclassified, and unsupported
+  documents.
 - The backend makes outbound calls to Cognee Cloud and OpenAI only when keys are configured.
 - The sample deterministic checks run with no cloud credentials.
 

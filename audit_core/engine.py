@@ -7,6 +7,7 @@ from decimal import Decimal
 from pathlib import Path
 from uuid import NAMESPACE_URL, uuid5
 
+from .discovery import discover_dossier
 from .models import (
     CalculationTerm,
     CalculationTrace,
@@ -18,6 +19,7 @@ from .models import (
 )
 from .parsers import (
     SourceRow,
+    canonicalize_rows,
     extract_payment_threshold,
     file_sha256,
     gdpdu_headers,
@@ -58,51 +60,53 @@ def _unique_rows(rows: list[SourceRow]) -> list[SourceRow]:
     return unique
 
 
-def _find_companion(folder: Path, *name_fragments: str, suffix: str) -> Path:
-    normalized_fragments = tuple(normalize_text(fragment) for fragment in name_fragments)
-    matches = sorted(
-        path
-        for path in folder.glob(f"*{suffix}")
-        if all(fragment in normalize_text(path.stem) for fragment in normalized_fragments)
-    )
-    if len(matches) > 1:
-        raise ValueError(
-            f"Ambiguous companion document for {name_fragments}: "
-            + ", ".join(path.name for path in matches)
-        )
-    if matches:
-        return matches[0]
-    return folder / f"__missing_{'_'.join(normalized_fragments)}{suffix}"
-
-
 class AuditEngine:
     def __init__(self, root: Path):
         self.root = locate_dossier_root(root)
-        self.gl_path = self.root / "Sachkonten" / "Sachkontobuchungen.txt"
-        self.vendor_path = self.root / "Kreditoren" / "Lieferantenbuchungen.txt"
-        self.asset_path = self.root / "AV" / "Anlagen.txt"
-        self.asset_posting_path = self.root / "AV" / "Anlagenbuchungen.txt"
-        docs = self.root / "Begleitdokumente"
-        self.receipt_path = _find_companion(docs, "wareneingangsliste", suffix=".csv")
-        self.change_path = _find_companion(docs, "stammdatenaenderungen", suffix=".csv")
-        self.permission_path = _find_companion(docs, "berechtigungsauswertung", suffix=".xlsx")
-        self.future_invoice_path = _find_companion(
-            docs, "fakturajournal", "kreditoren", suffix=".csv"
-        )
-        self.planning_path = _find_companion(docs, "pruefungsplanung", suffix=".docx")
+        self.discovery = discover_dossier(self.root)
+        resolutions = {item.role: item for item in self.discovery.roles}
+        self._path_issues: dict[Path, str] = {}
+        self._header_maps: dict[Path, dict[str, str]] = {}
 
-        self.gl = self._read_gdpdu(self.gl_path)
-        self.vendor_postings = self._read_gdpdu(self.vendor_path)
-        self.assets = self._read_gdpdu(self.asset_path)
-        self.asset_postings = self._read_gdpdu(self.asset_posting_path)
-        self.receipts = self._read_rows(self.receipt_path)
-        self.changes = self._read_rows(self.change_path)
+        def resolve(role: str) -> Path:
+            resolution = resolutions[role]
+            if resolution.status == "resolved" and resolution.document:
+                path = (self.root / resolution.document).resolve()
+                self._header_maps[path] = resolution.header_map
+                return path
+            path = self.root / f"__missing_role_{role}"
+            self._path_issues[path] = resolution.reason
+            return path
+
+        self.gl_path = resolve("general_ledger")
+        self.vendor_path = resolve("vendor_postings")
+        self.asset_path = resolve("asset_master")
+        self.asset_posting_path = resolve("asset_postings")
+        self.receipt_path = resolve("goods_receipts")
+        self.change_path = resolve("vendor_changes")
+        self.permission_path = resolve("permissions")
+        self.future_invoice_path = resolve("future_vendor_invoices")
+        self.planning_path = resolve("payment_policy")
+
+        self.gl = self._read_table(self.gl_path)
+        self.vendor_postings = self._read_table(self.vendor_path)
+        self.assets = self._read_table(self.asset_path)
+        self.asset_postings = self._read_table(self.asset_posting_path)
+        self.receipts = self._read_table(self.receipt_path)
+        self.changes = self._read_table(self.change_path)
         self.permissions = (
-            read_xlsx_table(self.permission_path, self.root, "Benutzer")
+            canonicalize_rows(
+                read_xlsx_table(
+                    self.permission_path,
+                    self.root,
+                    self._header_maps[self.permission_path]["Benutzer"],
+                ),
+                self._header_maps[self.permission_path],
+            )
             if self.permission_path.exists()
             else []
         )
-        self.future_invoices = self._read_rows(self.future_invoice_path)
+        self.future_invoices = self._read_table(self.future_invoice_path)
         self.planning = (
             read_docx_passages(self.planning_path, self.root)
             if self.planning_path.exists()
@@ -157,22 +161,30 @@ class AuditEngine:
             or "unfaktur" in normalize_text(row.data.get("BUCHUNGSTEXT"))
         ]
 
-    def _read_gdpdu(self, path: Path) -> list[SourceRow]:
-        if not path.exists() or not (path.parent / "index.xml").exists():
+    def _read_table(self, path: Path) -> list[SourceRow]:
+        if not path.exists():
             return []
-        return read_semicolon(path, self.root, gdpdu_headers(path.parent, path.name))
+        index_path = path.parent / "index.xml"
+        rows = (
+            read_semicolon(path, self.root, gdpdu_headers(path.parent, path.name))
+            if index_path.exists()
+            else read_semicolon(path, self.root)
+        )
+        return canonicalize_rows(rows, self._header_maps.get(path, {}))
 
-    def _read_rows(self, path: Path) -> list[SourceRow]:
-        return read_semicolon(path, self.root) if path.exists() else []
-
-    @staticmethod
-    def _procedure(rule_id: str, paths: list[Path]) -> ProcedureResult:
+    def _procedure(self, rule_id: str, paths: list[Path]) -> ProcedureResult:
         missing = [path.name for path in paths if not path.exists()]
         if missing:
+            issues = getattr(self, "_path_issues", {})
             return ProcedureResult(
                 rule_id=rule_id,
                 status="not_testable",
-                reason="Missing required inputs: " + ", ".join(missing),
+                reason="Missing required inputs: "
+                + "; ".join(
+                    issues.get(path, path.name)
+                    for path in paths
+                    if not path.exists()
+                ),
             )
         return ProcedureResult(rule_id=rule_id, status="completed")
 
@@ -234,6 +246,7 @@ class AuditEngine:
             ),
             procedures=procedures,
             suppressed_leads=suppressed,
+            ingestion=getattr(self, "discovery", None),
         )
         ensure_grounded(report)
         return report

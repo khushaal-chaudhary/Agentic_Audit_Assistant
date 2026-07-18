@@ -49,6 +49,9 @@ class DocumentSummary(BaseModel):
     size_bytes: int
     sha256: str
     evidence_locations: int
+    role: str | None = None
+    ingestion_status: str | None = None
+    ingestion_reason: str | None = None
 
 
 class ReviewRequest(BaseModel):
@@ -69,7 +72,7 @@ class ReviewRequest(BaseModel):
 
 app = FastAPI(
     title="Agentic Audit Assistant API",
-    version="0.3.0",
+    version="0.4.0",
     description="Deterministic, provenance-aware audit analysis.",
 )
 app.add_middleware(
@@ -138,7 +141,7 @@ def _process_job(job_id: str, source: Path | None = None) -> None:
 
 @app.get("/health")
 def health() -> dict[str, str]:
-    return {"status": "ok", "engine": "0.3.0", "mode": "local-first"}
+    return {"status": "ok", "engine": "0.4.0", "mode": "local-first"}
 
 
 @app.post(
@@ -247,23 +250,40 @@ def dossier_documents(job_id: str) -> list[DocumentSummary]:
     except FileNotFoundError as exc:
         raise HTTPException(status_code=409, detail="Dossier sources are not ready") from exc
     evidence_counts: dict[str, int] = {}
+    coverage_by_path = {
+        document.document: document
+        for document in (report.ingestion.documents if report.ingestion else [])
+    }
+    role_by_path = {
+        role.document: role.role
+        for role in (report.ingestion.roles if report.ingestion else [])
+        if role.document
+    }
     for finding in report.findings:
         for reference in finding.evidence:
             evidence_counts[reference.document] = (
                 evidence_counts.get(reference.document, 0) + 1
             )
-    return [
-        DocumentSummary(
-            path=path.relative_to(root).as_posix(),
+    summaries: list[DocumentSummary] = []
+    for path in sorted(root.rglob("*")):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(root).as_posix()
+        coverage = coverage_by_path.get(relative)
+        summaries.append(
+            DocumentSummary(
+            path=relative,
             name=path.name,
             extension=path.suffix.casefold().lstrip(".") or "file",
             size_bytes=path.stat().st_size,
             sha256=file_sha256(str(path)),
-            evidence_locations=evidence_counts.get(path.relative_to(root).as_posix(), 0),
+            evidence_locations=evidence_counts.get(relative, 0),
+            role=role_by_path.get(relative),
+            ingestion_status=coverage.status if coverage else None,
+            ingestion_reason=coverage.reason if coverage else None,
         )
-        for path in sorted(root.rglob("*"))
-        if path.is_file()
-    ]
+        )
+    return summaries
 
 
 @app.get("/api/dossiers/{job_id}/documents/{document_path:path}")
