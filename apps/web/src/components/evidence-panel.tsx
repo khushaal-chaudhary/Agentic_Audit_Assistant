@@ -1,23 +1,16 @@
 import type { Finding } from "@/lib/types";
-import { money } from "@/lib/types";
+import { evidenceLocator, evidenceUrl, money } from "@/lib/types";
 
-type Props = { finding?: Finding };
+type Props = { finding?: Finding; apiUrl: string; jobId?: string };
 
-function locator(finding: Finding, index: number) {
-  const evidence = finding.evidence[index];
-  if (evidence.sheet) return `${evidence.sheet} · ${evidence.cell_range ?? "cell"}`;
-  if (evidence.row) return `row ${evidence.row}`;
-  return evidence.passage ?? evidence.locator_type;
-}
-
-export function EvidencePanel({ finding }: Props) {
+export function EvidencePanel({ finding, apiUrl, jobId }: Props) {
   if (!finding) {
     return (
       <section className="grid min-w-0 place-items-center bg-[#faf9f6] p-10 text-center">
         <div className="max-w-sm">
           <p className="text-lg font-semibold">Run the audit agent</p>
           <p className="mt-2 text-sm leading-6 text-[var(--muted)]">
-            Findings will open beside their exact source rows, cells, and passages.
+            Findings will open beside their exact source rows, cells, pages, and passages.
           </p>
         </div>
       </section>
@@ -31,10 +24,7 @@ export function EvidencePanel({ finding }: Props) {
           <p className="text-xs font-semibold">{finding.evidence[0]?.document}</p>
           <p className="mt-1 text-[10px] text-[var(--muted)]">{finding.evidence.length} linked source locations</p>
         </div>
-        <div className="flex items-center gap-2">
-          <span className="result-chip prepared">Prepared</span>
-          <button className="rounded-md border border-[var(--line)] px-2 py-1 text-xs">Review⌄</button>
-        </div>
+        <span className="result-chip prepared">Evidence bound</span>
       </div>
 
       <div className="h-[calc(100vh-214px)] overflow-y-auto p-5">
@@ -58,17 +48,34 @@ export function EvidencePanel({ finding }: Props) {
           <div className="my-6 h-px bg-[var(--line)]" />
           <p className="text-[10px] font-semibold uppercase tracking-[0.13em] text-[var(--muted)]">Source evidence</p>
           <div className="mt-3 space-y-3">
-            {finding.evidence.map((evidence, index) => (
-              <div className="rounded-lg border border-[var(--line)] bg-[#fbfbf9] p-3" key={`${evidence.document}-${index}`}>
-                <div className="flex items-center justify-between gap-3">
-                  <p className="truncate text-[11px] font-semibold">{evidence.document}</p>
-                  <span className="source-chip">{locator(finding, index)}</span>
+            {finding.evidence.map((evidence, index) => {
+              const body = (
+                <>
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="truncate text-[11px] font-semibold">{evidence.document}</p>
+                    <span className="source-chip">{evidenceLocator(evidence)}</span>
+                  </div>
+                  <p className="mt-2 border-l-2 border-[var(--mint-strong)] pl-3 text-xs leading-5 text-[var(--muted)]">
+                    {evidence.excerpt}
+                  </p>
+                </>
+              );
+              return jobId ? (
+                <a
+                  className="block rounded-lg border border-[var(--line)] bg-[#fbfbf9] p-3 hover:border-[var(--mint-strong)]"
+                  href={evidenceUrl(apiUrl, jobId, evidence)}
+                  key={`${evidence.document}-${index}`}
+                  rel="noreferrer"
+                  target="_blank"
+                >
+                  {body}
+                </a>
+              ) : (
+                <div className="rounded-lg border border-[var(--line)] bg-[#fbfbf9] p-3" key={`${evidence.document}-${index}`}>
+                  {body}
                 </div>
-                <p className="mt-2 border-l-2 border-[var(--mint-strong)] pl-3 text-xs leading-5 text-[var(--muted)]">
-                  {evidence.excerpt}
-                </p>
-              </div>
-            ))}
+              );
+            })}
           </div>
 
           <div className="mt-6 rounded-lg bg-[var(--mint)] p-4">
@@ -80,4 +87,3 @@ export function EvidencePanel({ finding }: Props) {
     </section>
   );
 }
-

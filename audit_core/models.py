@@ -41,14 +41,21 @@ class Finding(BaseModel):
         return None if value is None else format(value, "f")
 
 
+class ProcedureResult(BaseModel):
+    rule_id: str
+    status: Literal["completed", "not_testable"]
+    reason: str | None = None
+
+
 class DossierReport(BaseModel):
     dossier_name: str
     generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     files_scanned: int
     tests_run: int
     findings: list[Finding]
+    procedures: list[ProcedureResult] = Field(default_factory=list)
     suppressed_leads: int = 0
-    engine_version: str = "0.1.0"
+    engine_version: str = "0.2.0"
 
 
 def ensure_grounded(report: DossierReport) -> None:
@@ -58,4 +65,3 @@ def ensure_grounded(report: DossierReport) -> None:
             raise ValueError(f"Finding {finding.id} has no evidence")
         if finding.amount is not None and not any(ref.excerpt for ref in finding.evidence):
             raise ValueError(f"Numeric finding {finding.id} has no source excerpt")
-

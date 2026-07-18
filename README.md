@@ -10,8 +10,10 @@ source locators.
 - Locale-safe `Decimal` handling for German monetary values.
 - CSV/TXT, XLSX, DOCX, and PDF source adapters.
 - Generic detectors for vendor-control conflicts, capitalised repairs, cut-off failures, and split payments.
-- FastAPI report endpoint and a Next.js investigation interface.
-- Cognee and OpenAI hooks; deterministic analysis works without either service.
+- Persisted ZIP ingestion jobs with progress, secure source-document links, and restart-safe reports.
+- A typed evidence graph in which findings and decimal calculations must resolve to source locators.
+- Grounded OpenAI Q&A with deterministic fallback and server-side citation/number validation.
+- Cost-controlled Cognee graph projection; deterministic analysis works without cloud services.
 
 ## Local demo
 
@@ -22,6 +24,11 @@ py -3 -m venv .venv
 ```
 
 The script starts the API on `http://localhost:8000` and the UI on `http://localhost:3000`.
+Run the bundled sample directly, or upload the dossier ZIP so its folder structure is preserved.
+
+Copy `.env.example` to `.env` and add the OpenAI and Cognee credentials for optional cloud
+features. Cognee receives the compact typed graph and validated excerpts rather than expensive raw
+ledger embeddings. The UI reports credit limits explicitly if Cognee still rejects a graph run.
 
 ## CLI
 
@@ -34,4 +41,3 @@ The script starts the API on `http://localhost:8000` and the UI on `http://local
 
 The demo is local-first and needs no paid infrastructure. A Cloud Run-ready container is retained as
 an optional deployment target. See `docs/architecture.md`.
-

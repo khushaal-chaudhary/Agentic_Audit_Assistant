@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import mimetypes
 import os
 import re
+from pathlib import Path
 from typing import Any
 
 import httpx
 
+from audit_core.graph import graph_json
 from audit_core.models import DossierReport
+from audit_core.parsers import decode_text
 
 
 class CogneeClient:
@@ -28,19 +33,72 @@ class CogneeClient:
         response.raise_for_status()
         return True
 
-    def dataset_name(self, dossier_name: str) -> str:
+    def dataset_name(self, dossier_name: str, fingerprint: str = "") -> str:
         slug = re.sub(r"[^a-z0-9]+", "_", dossier_name.casefold()).strip("_")
-        return f"audit_{slug}"[:80]
+        suffix = f"_{fingerprint}" if fingerprint else ""
+        return f"audit_{slug}{suffix}"[:80]
 
-    def sync_report(self, report: DossierReport, *, cognify: bool = True) -> dict[str, Any]:
-        dataset = self.dataset_name(report.dossier_name)
+    def sync_report(
+        self,
+        report: DossierReport,
+        source_root: Path | None = None,
+        *,
+        cognify: bool = True,
+        include_sources: bool = False,
+    ) -> dict[str, Any]:
+        hashes = sorted(
+            {reference.sha256 for finding in report.findings for reference in finding.evidence}
+        )
+        fingerprint = hashlib.sha256(
+            ("projection-v3|" + "|".join(hashes)).encode()
+        ).hexdigest()[:10]
+        dataset = self.dataset_name(report.dossier_name, fingerprint)
         content = json.dumps(report.model_dump(mode="json"), ensure_ascii=False, indent=2).encode()
-        files = [("data", ("audit-report.json", content, "application/json"))]
+        files = [
+            ("data", ("audit-report.json", content, "application/json")),
+            ("data", ("audit-evidence-graph.json", graph_json(report), "application/json")),
+        ]
+        supported = {".pdf", ".csv", ".txt", ".md", ".json", ".docx"}
+        excluded = 0
+        if source_root and include_sources:
+            for path in sorted(source_root.rglob("*")):
+                if not path.is_file():
+                    continue
+                if path.suffix.casefold() not in supported or path.stat().st_size > 25 * 1024 * 1024:
+                    excluded += 1
+                    continue
+                relative = path.relative_to(source_root)
+                upload_name = "__".join(relative.parts)
+                mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+                payload = (
+                    decode_text(path).encode("utf-8")
+                    if path.suffix.casefold() in {".csv", ".txt", ".md", ".json"}
+                    else path.read_bytes()
+                )
+                files.append(("data", (upload_name, payload, mime)))
+        elif source_root:
+            excluded = sum(1 for path in source_root.rglob("*") if path.is_file())
         form = {"datasetName": dataset, "run_in_background": "false"}
         with httpx.Client(base_url=self.base_url, headers=self.headers, timeout=120) as client:
             add_response = client.post("/api/v1/add", data=form, files=files)
-            add_response.raise_for_status()
-            result: dict[str, Any] = {"dataset": dataset, "add": add_response.json()}
+            conflict_detail = add_response.text.casefold()
+            reused = add_response.status_code == 409 and any(
+                marker in conflict_detail
+                for marker in ("already exists", "already present", "duplicate")
+            )
+            if not reused:
+                add_response.raise_for_status()
+            result: dict[str, Any] = {
+                "dataset": dataset,
+                "uploaded_files": len(files),
+                "excluded_files": excluded,
+                "projection_only": not include_sources,
+                "add": (
+                    {"status": "already_present", "detail": add_response.text[:500]}
+                    if reused
+                    else add_response.json()
+                ),
+            }
             if cognify:
                 graph_response = client.post(
                     "/api/v1/cognify",
@@ -79,4 +137,3 @@ class CogneeClient:
         response.raise_for_status()
         payload = response.json()
         return payload if isinstance(payload, list) else [payload]
-

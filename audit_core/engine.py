@@ -7,7 +7,7 @@ from decimal import Decimal
 from pathlib import Path
 from uuid import NAMESPACE_URL, uuid5
 
-from .models import DossierReport, EvidenceRef, Finding, ensure_grounded
+from .models import DossierReport, EvidenceRef, Finding, ProcedureResult, ensure_grounded
 from .parsers import (
     SourceRow,
     extract_payment_threshold,
@@ -38,6 +38,23 @@ def _query_evidence(path: Path, root: Path, query: str, excerpt: str) -> Evidenc
     )
 
 
+def _find_companion(folder: Path, *name_fragments: str, suffix: str) -> Path:
+    normalized_fragments = tuple(normalize_text(fragment) for fragment in name_fragments)
+    matches = sorted(
+        path
+        for path in folder.glob(f"*{suffix}")
+        if all(fragment in normalize_text(path.stem) for fragment in normalized_fragments)
+    )
+    if len(matches) > 1:
+        raise ValueError(
+            f"Ambiguous companion document for {name_fragments}: "
+            + ", ".join(path.name for path in matches)
+        )
+    if matches:
+        return matches[0]
+    return folder / f"__missing_{'_'.join(normalized_fragments)}{suffix}"
+
+
 class AuditEngine:
     def __init__(self, root: Path):
         self.root = locate_dossier_root(root)
@@ -46,53 +63,99 @@ class AuditEngine:
         self.asset_path = self.root / "AV" / "Anlagen.txt"
         self.asset_posting_path = self.root / "AV" / "Anlagenbuchungen.txt"
         docs = self.root / "Begleitdokumente"
-        self.receipt_path = docs / "Wareneingangsliste_2025.csv"
-        self.change_path = docs / "Stammdatenaenderungen_2025.csv"
-        self.permission_path = docs / "Berechtigungsauswertung_2025.xlsx"
-        self.future_invoice_path = docs / "Fakturajournal_Januar_2026_Kreditoren.csv"
-        self.planning_path = docs / "Pruefungsplanung_JET_2025.docx"
+        self.receipt_path = _find_companion(docs, "wareneingangsliste", suffix=".csv")
+        self.change_path = _find_companion(docs, "stammdatenaenderungen", suffix=".csv")
+        self.permission_path = _find_companion(docs, "berechtigungsauswertung", suffix=".xlsx")
+        self.future_invoice_path = _find_companion(
+            docs, "fakturajournal", "kreditoren", suffix=".csv"
+        )
+        self.planning_path = _find_companion(docs, "pruefungsplanung", suffix=".docx")
 
-        self.gl = read_semicolon(
-            self.gl_path, self.root, gdpdu_headers(self.gl_path.parent, self.gl_path.name)
+        self.gl = self._read_gdpdu(self.gl_path)
+        self.vendor_postings = self._read_gdpdu(self.vendor_path)
+        self.assets = self._read_gdpdu(self.asset_path)
+        self.asset_postings = self._read_gdpdu(self.asset_posting_path)
+        self.receipts = self._read_rows(self.receipt_path)
+        self.changes = self._read_rows(self.change_path)
+        self.permissions = (
+            read_xlsx_table(self.permission_path, self.root, "Benutzer")
+            if self.permission_path.exists()
+            else []
         )
-        self.vendor_postings = read_semicolon(
-            self.vendor_path,
-            self.root,
-            gdpdu_headers(self.vendor_path.parent, self.vendor_path.name),
+        self.future_invoices = self._read_rows(self.future_invoice_path)
+        self.planning = (
+            read_docx_passages(self.planning_path, self.root)
+            if self.planning_path.exists()
+            else []
         )
-        self.assets = read_semicolon(
-            self.asset_path,
-            self.root,
-            gdpdu_headers(self.asset_path.parent, self.asset_path.name),
-        )
-        self.asset_postings = read_semicolon(
-            self.asset_posting_path,
-            self.root,
-            gdpdu_headers(self.asset_posting_path.parent, self.asset_posting_path.name),
-        )
-        self.receipts = read_semicolon(self.receipt_path, self.root)
-        self.changes = read_semicolon(self.change_path, self.root)
-        self.permissions = read_xlsx_table(self.permission_path, self.root, "Benutzer")
-        self.future_invoices = read_semicolon(self.future_invoice_path, self.root)
-        self.planning = read_docx_passages(self.planning_path, self.root)
+
+    def _read_gdpdu(self, path: Path) -> list[SourceRow]:
+        if not path.exists() or not (path.parent / "index.xml").exists():
+            return []
+        return read_semicolon(path, self.root, gdpdu_headers(path.parent, path.name))
+
+    def _read_rows(self, path: Path) -> list[SourceRow]:
+        return read_semicolon(path, self.root) if path.exists() else []
+
+    @staticmethod
+    def _procedure(rule_id: str, paths: list[Path]) -> ProcedureResult:
+        missing = [path.name for path in paths if not path.exists()]
+        if missing:
+            return ProcedureResult(
+                rule_id=rule_id,
+                status="not_testable",
+                reason="Missing required inputs: " + ", ".join(missing),
+            )
+        return ProcedureResult(rule_id=rule_id, status="completed")
 
     def run(self) -> DossierReport:
         findings: list[Finding] = []
-        vendor_findings, vendor_suppressed = self.detect_vendor_control_failures()
-        split_findings, split_suppressed = self.detect_split_payments()
-        findings.extend(vendor_findings)
-        findings.extend(self.detect_capitalised_repairs())
-        findings.extend(self.detect_cutoff_failures())
-        findings.extend(split_findings)
+        suppressed = 0
+        procedures = [
+            self._procedure(
+                "VENDOR_CONTROL_CHAIN",
+                [
+                    self.gl_path,
+                    self.vendor_path,
+                    self.receipt_path,
+                    self.change_path,
+                    self.permission_path,
+                ],
+            ),
+            self._procedure(
+                "CAPITALISED_REPAIRS", [self.asset_path, self.asset_posting_path]
+            ),
+            self._procedure(
+                "UNRECORDED_CUTOFF_LIABILITIES",
+                [self.gl_path, self.receipt_path, self.future_invoice_path],
+            ),
+            self._procedure(
+                "SPLIT_PAYMENTS_BELOW_THRESHOLD", [self.vendor_path, self.planning_path]
+            ),
+        ]
+
+        if procedures[0].status == "completed":
+            detected, detector_suppressed = self.detect_vendor_control_failures()
+            findings.extend(detected)
+            suppressed += detector_suppressed
+        if procedures[1].status == "completed":
+            findings.extend(self.detect_capitalised_repairs())
+        if procedures[2].status == "completed":
+            findings.extend(self.detect_cutoff_failures())
+        if procedures[3].status == "completed":
+            detected, detector_suppressed = self.detect_split_payments()
+            findings.extend(detected)
+            suppressed += detector_suppressed
 
         report = DossierReport(
             dossier_name=self.root.name,
             files_scanned=sum(1 for path in self.root.rglob("*") if path.is_file()),
-            tests_run=4,
+            tests_run=sum(item.status == "completed" for item in procedures),
             findings=sorted(
                 findings, key=lambda item: (item.severity != "high", -item.confidence)
             ),
-            suppressed_leads=vendor_suppressed + split_suppressed,
+            procedures=procedures,
+            suppressed_leads=suppressed,
         )
         ensure_grounded(report)
         return report
@@ -510,4 +573,3 @@ class AuditEngine:
 
 def analyze_dossier(path: str | Path) -> DossierReport:
     return AuditEngine(Path(path)).run()
-
