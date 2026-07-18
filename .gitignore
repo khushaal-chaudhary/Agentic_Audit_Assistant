@@ -1,0 +1,40 @@
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+coverage/
+*.tsbuildinfo
+
+# Runtime data
+data/uploads/
+data/runtime/
+tmp/
+*.db
+*.sqlite
+*.sqlite3
+
+# IDE / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Local evaluation material: never ship the answer key
+UEBUNG_GROUND-TRUTH_SEALED_Muster-Verpackungen.md
+
+# Duplicate archive; the extracted sample remains versioned
+Uebungsdaten_Muster_Verpackungen.zip

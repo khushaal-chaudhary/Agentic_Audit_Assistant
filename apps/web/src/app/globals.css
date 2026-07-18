@@ -1,0 +1,90 @@
+@import "tailwindcss";
+
+:root {
+  --canvas: #eeede8;
+  --ink: #171816;
+  --muted: #6f716c;
+  --line: #deded8;
+  --line-strong: #c9cac3;
+  --soft: #f7f7f3;
+  --accent: #245b3f;
+  --green: #173f2b;
+  --mint: #daf0df;
+  --mint-strong: #49a66f;
+  --danger: #b42318;
+  --danger-soft: #fce8e6;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--canvas);
+  color: var(--ink);
+  font-family: Arial, Helvetica, sans-serif;
+}
+button, input { font: inherit; }
+button { cursor: pointer; }
+button:disabled { cursor: wait; opacity: 0.65; }
+
+.panel {
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: white;
+  box-shadow: 0 1px 2px rgb(16 24 40 / 0.03);
+}
+
+.eyebrow {
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.primary-button {
+  border: 0;
+  border-radius: 10px;
+  background: var(--accent);
+  padding: 0.75rem 1rem;
+  color: white;
+  font-size: 0.875rem;
+  font-weight: 700;
+  transition: background 150ms ease;
+}
+.primary-button:hover { background: #124da8; }
+
+.severity {
+  border-radius: 999px;
+  padding: 0.25rem 0.55rem;
+  font-size: 0.65rem;
+  font-weight: 800;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+.severity.high, .severity.fraud { background: #fff0f0; color: #b42318; }
+.severity.medium, .severity.control { background: #fff8e8; color: #9a6700; }
+.severity.low, .severity.misstatement { background: #eef4ff; color: #1849a9; }
+
+.source-chip {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--soft);
+  padding: 0.2rem 0.4rem;
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.62rem;
+}
+
+.result-chip {
+  width: fit-content;
+  border-radius: 6px;
+  padding: 0.25rem 0.5rem;
+  font-size: 0.68rem;
+  font-weight: 700;
+}
+.result-chip.failed { background: var(--danger-soft); color: var(--danger); }
+.result-chip.passed { background: var(--mint); color: #197244; }
+.result-chip.review { background: #fff0c9; color: #765400; }
+.result-chip.prepared { background: #f4e8be; color: #6d5620; }
+
+::selection { background: var(--mint); color: var(--green); }
